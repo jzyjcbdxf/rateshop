@@ -23,21 +23,24 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 hard-fixed no Selenium Manager fallback"
+APP_VERSION = "2026-06-22 Starwood hard-fixed no Selenium Manager fallback"
 
 # ============================================================
-# Hotel map: dropdown label -> 1hotels booking hotel code
+# Hotel map: dropdown label -> Starwood booking hotel code
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, str] = {
-    "1SB": "60507", "1CP":"60735","1BB":"66266", "1TY":"96185"
+    "1SB": "60507",
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
-DEFAULT_CHECKIN = date(2026, 6, 22)
-DEFAULT_CHECKOUT = date(2026, 6, 23)
+DEFAULT_CHECKIN = date.today()
+DEFAULT_CHECKOUT = date.today() + timedelta(days=1)
 DEFAULT_DISCOUNT_PERCENT = 10
 BASE_BOOKING_URL = "https://www.1hotels.com/book/{hotel_code}"
 
+# Keywords used only as a room-name filter.
+# The scraper scans h1/h2/h3/h4 titles and keeps titles that look like room names.
+# This prevents non-room text such as navigation labels, banners, or policy copy from being parsed as rooms.
 ROOM_NAME_HINTS = (
     "room",
     "king",
@@ -55,7 +58,7 @@ ROOM_NAME_HINTS = (
 
 PRICE_RE = re.compile(r"\$\s*([0-9][0-9,]*)")
 
-st.set_page_config(page_title="酒店房价监控系统", layout="wide")
+st.set_page_config(page_title="Starwood Rate Monitor", layout="wide")
 
 
 # ============================================================
@@ -78,7 +81,7 @@ def login_required() -> None:
 
     if not expected_user_name or not expected_password:
         st.error(
-            "请先在 Streamlit Secrets 里配置登录账号：\n\n"
+            "Please configure the login credentials in Streamlit Secrets first:\n\n"
             "user_name = 123\n"
             "password = 456"
         )
@@ -90,7 +93,7 @@ def login_required() -> None:
     if st.session_state.authenticated:
         return
 
-    st.title("🔐 1 Hotels 房价工具登录")
+    st.title("🔐 Starwood Rate Tool Login")
     with st.form("login_form", clear_on_submit=False):
         user_name = st.text_input("User Name")
         password = st.text_input("Password", type="password")
@@ -101,7 +104,7 @@ def login_required() -> None:
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("用户名或密码不正确。")
+            st.error("Invalid username or password.")
 
     st.stop()
 
@@ -251,10 +254,10 @@ def validate_chrome_runtime() -> Dict[str, object]:
         if not chromedriver_binary:
             missing.append("chromedriver")
         raise RuntimeError(
-            "Streamlit Cloud 没有检测到系统浏览器依赖："
+            "Streamlit Cloud did not detect the required browser dependencies: "
             + ", ".join(missing)
-            + "。请确认 packages.txt 在 GitHub repo 根目录，内容必须是两行：chromium 和 chromium-driver。"
-            + " 修复后必须 Reboot app / Clear cache / 重新部署。"
+            + ". Please confirm packages.txt is in the GitHub repo root and contains exactly two lines: chromium and chromium-driver."
+            + " After fixing it, reboot the app, clear cache, and redeploy."
         )
 
     return runtime
@@ -552,8 +555,8 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
 # ============================================================
 # UI
 # ============================================================
-st.title("🏨 1 Hotels 实时房价爬虫控制台")
-st.caption("支持 Streamlit Cloud Secrets 登录、酒店代码 dropdown、日期动态 URL、折扣 Best offer 输出。")
+st.title("🏨 Starwood Live Rate Scraper Console")
+st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, and discounted Best Offer output.")
 
 with st.sidebar:
     st.header("⚙️ Search Settings")
@@ -598,7 +601,7 @@ with st.sidebar:
         st.caption(str(runtime.get("chromedriver_version") or ""))
 
 if checkout <= checkin:
-    st.error("Check-out 日期必须晚于 Check-in 日期。")
+    st.error("Check-out date must be later than Check-in date.")
     st.stop()
 
 target_url = build_booking_url(
@@ -628,7 +631,7 @@ st.markdown(
 )
 
 if email_clicked:
-    st.info("EMAIL 按钮已预留：可以后续接 SMTP、SendGrid 或 Gmail API。")
+    st.info("EMAIL is reserved for a future SMTP, SendGrid, or Gmail API integration.")
 
 if "last_output_text" not in st.session_state:
     st.session_state.last_output_text = ""
@@ -638,7 +641,7 @@ if "last_error" not in st.session_state:
     st.session_state.last_error = ""
 
 if search_clicked:
-    with st.spinner("正在启动无头浏览器并抓取官网动态价格，通常需要 20-45 秒..."):
+    with st.spinner("Starting the headless browser and fetching live rates. This usually takes 20-45 seconds..."):
         try:
             result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds))
             rooms = result.get("rooms", [])
@@ -647,7 +650,7 @@ if search_clicked:
             if not rooms:
                 st.session_state.last_output_text = ""
                 st.session_state.last_df = pd.DataFrame()
-                st.error("没有解析到房型价格。可能是页面结构变化、价格组件未加载、或触发了反爬/验证。")
+                st.error("No room rates were parsed. The page structure may have changed, the rate component may not have loaded, or anti-bot verification may have been triggered.")
                 with st.expander("Debug: page text preview"):
                     st.text(result.get("page_text_preview", "")[:3500])
                 with st.expander("Debug: HTML preview"):
@@ -656,15 +659,15 @@ if search_clicked:
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
-                st.success(f"抓取完成：解析到 {len(rooms)} 个房型。")
+                st.success(f"Search completed: parsed {len(rooms)} room type(s).")
         except Exception as exc:
             st.session_state.last_error = str(exc)
-            st.error(f"浏览器启动或运行失败: {exc}")
+            st.error(f"Browser startup or runtime failed: {exc}")
             with st.expander("Debug: Chrome runtime diagnostics", expanded=True):
                 st.json(get_chrome_runtime())
             st.warning(
-                "重点：如果错误里还出现 /home/appuser/.cache/selenium/chromedriver，"
-                "说明 Streamlit 跑的仍然不是这个 hard-fixed 版本，或者 app 没有重启成功。"
+                "Important: if the error still shows /home/appuser/.cache/selenium/chromedriver, "
+                "Streamlit is still running an older app.py, or the app was not rebooted successfully."
             )
 
 left, right = st.columns([1.15, 1])
@@ -685,12 +688,12 @@ with right:
         st.download_button(
             label="Download CSV",
             data=csv_data,
-            file_name=f"1hotels_{hotel_key}_{checkin}_{checkout}.csv",
+            file_name=f"starwood_{hotel_key}_{checkin}_{checkout}.csv",
             mime="text/csv",
             use_container_width=True,
         )
     else:
-        st.info("点击 SEARCH 后，房型和价格会显示在这里。")
+        st.info("Click SEARCH to load room types and live rates here.")
 
 with st.expander("Deployment files for Streamlit Cloud"):
     st.markdown("**requirements.txt**")
