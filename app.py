@@ -738,6 +738,27 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, re
     ) from last_exception
 
 
+ROOM_CATEGORY_ORDER = ["Hotel Rooms", "Homes", "Connecting"]
+
+
+def get_room_category(room_name: str) -> str:
+    """Classify room types for UI grouping and email sections."""
+    cleaned_name = normalize_room_name(room_name).lower()
+    if "connecting" in cleaned_name:
+        return "Connecting"
+    if "home" in cleaned_name:
+        return "Homes"
+    return "Hotel Rooms"
+
+
+def group_rooms_by_category(rooms: List[Dict]) -> Dict[str, List[Dict]]:
+    grouped: Dict[str, List[Dict]] = {category: [] for category in ROOM_CATEGORY_ORDER}
+    for room in rooms:
+        category = get_room_category(str(room.get("room_name", "")))
+        grouped.setdefault(category, []).append(room)
+    return grouped
+
+
 def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
     lines: List[str] = []
     for room in rooms:
@@ -750,6 +771,14 @@ def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
             f"(Currently selling: {format_money(current, currency_symbol)})"
         )
     return lines
+
+
+def build_grouped_output_lines(rooms: List[Dict], discount_percent: float) -> Dict[str, List[str]]:
+    grouped_rooms = group_rooms_by_category(rooms)
+    return {
+        category: build_output_lines(grouped_rooms.get(category, []), discount_percent)
+        for category in ROOM_CATEGORY_ORDER
+    }
 
 
 def build_selection_label(room: Dict, discount_percent: float) -> str:
@@ -781,13 +810,21 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
     return pd.DataFrame(rows)
 
 
-def get_selected_room_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
+def get_room_selection_key(index: int, room: Dict) -> str:
+    return f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+
+
+def get_selected_rooms(rooms: List[Dict]) -> List[Dict]:
     selected_rooms = []
     for index, room in enumerate(rooms):
-        key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+        key = get_room_selection_key(index, room)
         if st.session_state.get(key, False):
             selected_rooms.append(room)
-    return build_output_lines(selected_rooms, discount_percent)
+    return selected_rooms
+
+
+def get_selected_room_lines_by_category(rooms: List[Dict], discount_percent: float) -> Dict[str, List[str]]:
+    return build_grouped_output_lines(get_selected_rooms(rooms), discount_percent)
 
 
 def build_email_body(
@@ -795,7 +832,7 @@ def build_email_body(
     ending: str,
     checkin: date,
     checkout: date,
-    selected_room_lines: List[str],
+    selected_room_lines_by_category: Dict[str, List[str]],
     rates_include_tax: bool,
 ) -> str:
     room_nights = max((checkout - checkin).days, 1)
@@ -816,8 +853,22 @@ def build_email_body(
         f"Rates are per night {tax_phrase}.",
     ]
 
-    if selected_room_lines:
-        details.extend(["", *selected_room_lines])
+    has_selected_rooms = any(
+        selected_room_lines_by_category.get(category)
+        for category in ROOM_CATEGORY_ORDER
+    )
+
+    if has_selected_rooms:
+        details.append("")
+        for category in ROOM_CATEGORY_ORDER:
+            category_lines = selected_room_lines_by_category.get(category, [])
+            if not category_lines:
+                continue
+            details.append(category)
+            details.extend(category_lines)
+            details.append("")
+        while details and details[-1] == "":
+            details.pop()
     else:
         details.extend(["", "No room type selected."])
 
@@ -1016,7 +1067,7 @@ if search_clicked:
                 st.session_state.last_rooms = rooms
                 st.session_state.generated_email = ""
                 for index, room in enumerate(rooms):
-                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                    room_key = get_room_selection_key(index, room)
                     st.session_state[room_key] = False
                 st.success(f"Search completed: parsed {len(rooms)} room type(s).")
                 with st.expander("Debug: retry history", expanded=False):
@@ -1039,20 +1090,28 @@ if rooms_for_selection:
     with select_all_col:
         if st.button("Select all room types", use_container_width=True):
             for index, room in enumerate(rooms_for_selection):
-                room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                room_key = get_room_selection_key(index, room)
                 st.session_state[room_key] = True
             st.rerun()
     with clear_all_col:
         if st.button("Clear selections", use_container_width=True):
             for index, room in enumerate(rooms_for_selection):
-                room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                room_key = get_room_selection_key(index, room)
                 st.session_state[room_key] = False
             st.rerun()
 
-    for index, room in enumerate(rooms_for_selection):
-        line = build_selection_label(room, discount_percent)
-        room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
-        st.checkbox(line, key=room_key)
+    grouped_selection_rooms = group_rooms_by_category(rooms_for_selection)
+    room_index_by_identity = {id(room): index for index, room in enumerate(rooms_for_selection)}
+    for category in ROOM_CATEGORY_ORDER:
+        category_rooms = grouped_selection_rooms.get(category, [])
+        if not category_rooms:
+            continue
+        st.markdown(f"### {category}")
+        for room in category_rooms:
+            index = room_index_by_identity[id(room)]
+            line = build_selection_label(room, discount_percent)
+            room_key = get_room_selection_key(index, room)
+            st.checkbox(line, key=room_key)
 else:
     st.info("Click SEARCH to load room types and live rates here.")
 
@@ -1086,13 +1145,13 @@ with email_button_col:
     email_clicked = st.button("EMAIL", type="primary", use_container_width=True)
 
 if email_clicked or st.session_state.generated_email:
-    selected_lines = get_selected_room_lines(st.session_state.last_rooms, discount_percent)
+    selected_lines_by_category = get_selected_room_lines_by_category(st.session_state.last_rooms, discount_percent)
     st.session_state.generated_email = build_email_body(
         opening=st.session_state.email_opening,
         ending=st.session_state.email_ending,
         checkin=checkin,
         checkout=checkout,
-        selected_room_lines=selected_lines,
+        selected_room_lines_by_category=selected_lines_by_category,
         rates_include_tax=bool(st.session_state.rates_include_tax),
     )
     save_user_preferences()
