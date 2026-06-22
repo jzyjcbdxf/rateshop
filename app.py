@@ -1,5 +1,8 @@
 import math
+import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -9,7 +12,9 @@ import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -44,7 +49,6 @@ ROOM_NAME_HINTS = (
 )
 
 PRICE_RE = re.compile(r"\$\s*([0-9][0-9,]*)")
-
 
 st.set_page_config(page_title="酒店房价监控系统", layout="wide")
 
@@ -136,14 +140,90 @@ def build_booking_url(
 
 
 # ============================================================
-# Selenium driver
+# Chrome / Chromedriver helpers for Streamlit Cloud
+# Fixes: Service ~/.cache/selenium/chromedriver/... unexpectedly exited, status code 127
+# Cause: Selenium Manager downloaded a driver that cannot run in the cloud container.
+# Solution: install system chromium/chromium-driver via packages.txt and use /usr/bin paths.
 # ============================================================
-def init_driver() -> webdriver.Chrome:
+def first_existing_path(paths: List[str]) -> Optional[str]:
+    for item in paths:
+        if item and os.path.exists(item):
+            return item
+    return None
+
+
+def first_executable(names: List[str]) -> Optional[str]:
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def run_version_command(binary_path: Optional[str]) -> str:
+    if not binary_path:
+        return "not found"
+    try:
+        completed = subprocess.run(
+            [binary_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        output = (completed.stdout or completed.stderr or "").strip()
+        return output or "version unavailable"
+    except Exception as exc:
+        return f"version check failed: {exc}"
+
+
+@st.cache_resource(show_spinner=False)
+def get_chrome_paths() -> Dict[str, Optional[str]]:
+    chromium_binary = first_existing_path(
+        [
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+        ]
+    ) or first_executable(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"])
+
+    chromedriver_binary = first_existing_path(
+        [
+            "/usr/bin/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+        ]
+    ) or first_executable(["chromedriver"])
+
+    return {
+        "chromium_binary": chromium_binary,
+        "chromedriver_binary": chromedriver_binary,
+        "chromium_version": run_version_command(chromium_binary),
+        "chromedriver_version": run_version_command(chromedriver_binary),
+    }
+
+
+def build_chrome_options() -> Options:
+    paths = get_chrome_paths()
     chrome_options = Options()
+
+    if paths.get("chromium_binary"):
+        chrome_options.binary_location = str(paths["chromium_binary"])
+
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-default-apps")
+    chrome_options.add_argument("--disable-sync")
+    chrome_options.add_argument("--metrics-recording-only")
+    chrome_options.add_argument("--mute-audio")
+    chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
@@ -154,9 +234,22 @@ def init_driver() -> webdriver.Chrome:
     )
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
+    return chrome_options
 
-    driver = webdriver.Chrome(options=chrome_options)
-    driver.set_page_load_timeout(60)
+
+def init_driver() -> webdriver.Chrome:
+    paths = get_chrome_paths()
+    chrome_options = build_chrome_options()
+
+    if paths.get("chromedriver_binary"):
+        service = Service(executable_path=str(paths["chromedriver_binary"]))
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    else:
+        # Fallback for local machines where Selenium Manager works.
+        # On Streamlit Cloud this should not be used; install chromium-driver instead.
+        driver = webdriver.Chrome(options=chrome_options)
+
+    driver.set_page_load_timeout(75)
     return driver
 
 
@@ -362,7 +455,7 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6) ->
                     "document.querySelectorAll('h2,h3,h4').length > 0);"
                 )
             )
-        except Exception:
+        except TimeoutException:
             pass
 
         time.sleep(settle_seconds)
@@ -454,7 +547,14 @@ with st.sidebar:
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
     promo_code = st.text_input("Promo Code", value="")
-    wait_seconds = st.slider("Browser wait seconds", 15, 60, 35, 5)
+    wait_seconds = st.slider("Browser wait seconds", 15, 75, 35, 5)
+
+    with st.expander("Chrome runtime check"):
+        chrome_paths = get_chrome_paths()
+        st.write("Chromium:", chrome_paths.get("chromium_binary") or "not found")
+        st.write("Chromedriver:", chrome_paths.get("chromedriver_binary") or "not found")
+        st.caption(chrome_paths.get("chromium_version") or "")
+        st.caption(chrome_paths.get("chromedriver_version") or "")
 
 if checkout <= checkin:
     st.error("Check-out 日期必须晚于 Check-in 日期。")
@@ -493,12 +593,15 @@ if "last_output_text" not in st.session_state:
     st.session_state.last_output_text = ""
 if "last_df" not in st.session_state:
     st.session_state.last_df = pd.DataFrame()
+if "last_error" not in st.session_state:
+    st.session_state.last_error = ""
 
 if search_clicked:
     with st.spinner("正在启动无头浏览器并抓取官网动态价格，通常需要 20-45 秒..."):
         try:
             result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds))
             rooms = result.get("rooms", [])
+            st.session_state.last_error = ""
 
             if not rooms:
                 st.session_state.last_output_text = ""
@@ -513,7 +616,18 @@ if search_clicked:
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
                 st.success(f"抓取完成：解析到 {len(rooms)} 个房型。")
+        except WebDriverException as exc:
+            chrome_paths = get_chrome_paths()
+            st.session_state.last_error = str(exc)
+            st.error(f"浏览器启动或运行失败: {exc}")
+            st.warning(
+                "如果在 Streamlit Cloud 上运行，请确认 repo 根目录有 packages.txt，"
+                "内容至少包含 chromium 和 chromium-driver，然后重启/重新部署 app。"
+            )
+            with st.expander("Debug: Chrome paths and versions"):
+                st.json(chrome_paths)
         except Exception as exc:
+            st.session_state.last_error = str(exc)
             st.error(f"运行中发生错误: {exc}")
 
 left, right = st.columns([1.15, 1])
@@ -541,18 +655,30 @@ with right:
     else:
         st.info("点击 SEARCH 后，房型和价格会显示在这里。")
 
-with st.expander("Deployment notes for Streamlit Cloud"):
+with st.expander("Deployment files for Streamlit Cloud"):
+    st.markdown("**requirements.txt**")
     st.code(
         """
-# .streamlit/secrets.toml or Streamlit Cloud App settings -> Secrets
-user_name = 123
-password = 456
-
-# requirements.txt suggestion
 streamlit
 selenium
 beautifulsoup4
 pandas
+        """.strip(),
+        language="text",
+    )
+    st.markdown("**packages.txt**")
+    st.code(
+        """
+chromium
+chromium-driver
+        """.strip(),
+        language="text",
+    )
+    st.markdown("**Streamlit Secrets**")
+    st.code(
+        """
+user_name = 123
+password = 456
         """.strip(),
         language="toml",
     )
