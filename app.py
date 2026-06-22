@@ -29,7 +29,7 @@ APP_VERSION = "2026-06-22 hard-fixed no Selenium Manager fallback"
 # Hotel map: dropdown label -> 1hotels booking hotel code
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, str] = {
-    "1SB": "60507", "1CP":"60735","1BB":"66266", "1TY":"96185",
+    "1SB": "60507", "1CP":"60735","1BB":"66266", "1TY":"96185"
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
