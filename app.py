@@ -26,25 +26,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback currency-label-fix"
+APP_VERSION = "2026-06-22 Starwood Hotel Rateshop hotel-currency-map"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
 # ============================================================
-HOTEL_CODE_MAP: Dict[str, str] = {
-    "1SB": "60507",
-    "1CP": "60735",
-    "1BB": "66266",
-    "1TY": "96185",
-    "1ML": "47157",
-    "1MF": "40333",
-    "1HNB": "5826",
-    "1CPH": "41069",
-    "1NV": "35903",
-    "1SF": "36017",
-    "1SE": "47314",
-    "1TO": "31116",
-    "1WH": "77961",
+HOTEL_CODE_MAP: Dict[str, Dict[str, str]] = {
+    "1SB": {"code": "60507", "currency_symbol": "$"},
+    "1CP": {"code": "60735", "currency_symbol": "$"},
+    "1BB": {"code": "66266", "currency_symbol": "$"},
+    "1TY": {"code": "96185", "currency_symbol": "¥"},
+    "1ML": {"code": "47157", "currency_symbol": "$"},
+    "1MF": {"code": "40333", "currency_symbol": "£"},
+    "1HNB": {"code": "5826", "currency_symbol": "$"},
+    "1CPH": {"code": "41069", "currency_symbol": "kr."},
+    "1NV": {"code": "35903", "currency_symbol": "$"},
+    "1SF": {"code": "36017", "currency_symbol": "$"},
+    "1SE": {"code": "47314", "currency_symbol": "$"},
+    "1TO": {"code": "31116", "currency_symbol": "$"},
+    "1WH": {"code": "77961", "currency_symbol": "$"},
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
@@ -194,6 +194,28 @@ def save_user_preferences() -> None:
 
 
 load_user_preferences_once()
+
+
+# ============================================================
+# Hotel config helpers
+# ============================================================
+def get_hotel_code(hotel_key: str) -> str:
+    return str(HOTEL_CODE_MAP[hotel_key]["code"])
+
+
+def get_hotel_currency_symbol(hotel_key: str) -> str:
+    return str(HOTEL_CODE_MAP[hotel_key].get("currency_symbol") or "$")
+
+
+def apply_hotel_currency_symbol(rooms: List[Dict], hotel_key: str) -> List[Dict]:
+    """Use the configured hotel currency symbol for all displayed quotes and email output."""
+    currency_symbol = get_hotel_currency_symbol(hotel_key)
+    updated_rooms: List[Dict] = []
+    for room in rooms:
+        updated_room = dict(room)
+        updated_room["currency_symbol"] = currency_symbol
+        updated_rooms.append(updated_room)
+    return updated_rooms
 
 
 # ============================================================
@@ -886,8 +908,10 @@ with st.sidebar:
         options=list(HOTEL_CODE_MAP.keys()),
         index=list(HOTEL_CODE_MAP.keys()).index(DEFAULT_HOTEL_KEY),
     )
-    hotel_code = HOTEL_CODE_MAP[hotel_key]
+    hotel_code = get_hotel_code(hotel_key)
+    selected_currency_symbol = get_hotel_currency_symbol(hotel_key)
     st.text_input("Hotel code", value=hotel_code, disabled=True)
+    st.text_input("Currency symbol", value=selected_currency_symbol, disabled=True)
 
     checkin = st.date_input("Check-in / startDate", value=DEFAULT_CHECKIN)
     default_checkout = max(DEFAULT_CHECKOUT, checkin + timedelta(days=1))
@@ -959,7 +983,7 @@ if search_clicked:
     with st.spinner("Starting the headless browser and fetching live rates. This usually takes 20-45 seconds..."):
         try:
             result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds), retry_once=True)
-            rooms = result.get("rooms", [])
+            rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
 
