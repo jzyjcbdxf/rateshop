@@ -20,8 +20,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 # ============================================================
+# IMPORTANT VERSION MARKER
+# If you do not see this marker in Streamlit sidebar, the old app.py is still running.
+# ============================================================
+APP_VERSION = "2026-06-22 hard-fixed no Selenium Manager fallback"
+
+# ============================================================
 # Hotel map: dropdown label -> 1hotels booking hotel code
-# Add more hotels here later, for example: "1BK": "xxxxx"
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, str] = {
     "1SB": "60507",
@@ -67,7 +72,7 @@ def get_secret_value(key: str, default: str = "") -> str:
     return str(value)
 
 
-def login_required() -> bool:
+def login_required() -> None:
     expected_user_name = get_secret_value("user_name")
     expected_password = get_secret_value("password")
 
@@ -83,7 +88,7 @@ def login_required() -> bool:
         st.session_state.authenticated = False
 
     if st.session_state.authenticated:
-        return True
+        return
 
     st.title("🔐 1 Hotels 房价工具登录")
     with st.form("login_form", clear_on_submit=False):
@@ -140,77 +145,124 @@ def build_booking_url(
 
 
 # ============================================================
-# Chrome / Chromedriver helpers for Streamlit Cloud
-# Fixes: Service ~/.cache/selenium/chromedriver/... unexpectedly exited, status code 127
-# Cause: Selenium Manager downloaded a driver that cannot run in the cloud container.
-# Solution: install system chromium/chromium-driver via packages.txt and use /usr/bin paths.
+# Chrome / Chromedriver helpers
+# This version intentionally NEVER falls back to Selenium Manager.
+# If /usr/bin/chromedriver is not installed, it fails with a clear packages.txt message.
+# This prevents Selenium from using:
+# /home/appuser/.cache/selenium/chromedriver/linux64/.../chromedriver
 # ============================================================
-def first_existing_path(paths: List[str]) -> Optional[str]:
-    for item in paths:
-        if item and os.path.exists(item):
-            return item
-    return None
+def shell_output(command: List[str], timeout: int = 10) -> Dict[str, str]:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "command": " ".join(command),
+            "returncode": str(completed.returncode),
+            "stdout": (completed.stdout or "").strip(),
+            "stderr": (completed.stderr or "").strip(),
+        }
+    except Exception as exc:
+        return {
+            "command": " ".join(command),
+            "returncode": "exception",
+            "stdout": "",
+            "stderr": str(exc),
+        }
 
 
-def first_executable(names: List[str]) -> Optional[str]:
-    for name in names:
-        path = shutil.which(name)
-        if path:
+def first_existing_executable(paths: List[str]) -> Optional[str]:
+    for path in paths:
+        if path and os.path.exists(path) and os.access(path, os.X_OK):
             return path
     return None
 
 
-def run_version_command(binary_path: Optional[str]) -> str:
+def first_path_from_which(names: List[str]) -> Optional[str]:
+    for name in names:
+        path = shutil.which(name)
+        if path and os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def version_of(binary_path: Optional[str]) -> str:
     if not binary_path:
         return "not found"
-    try:
-        completed = subprocess.run(
-            [binary_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-        output = (completed.stdout or completed.stderr or "").strip()
-        return output or "version unavailable"
-    except Exception as exc:
-        return f"version check failed: {exc}"
+    result = shell_output([binary_path, "--version"], timeout=8)
+    combined = (result.get("stdout") or result.get("stderr") or "").strip()
+    return combined or f"version unavailable, rc={result.get('returncode')}"
 
 
 @st.cache_resource(show_spinner=False)
-def get_chrome_paths() -> Dict[str, Optional[str]]:
-    chromium_binary = first_existing_path(
+def get_chrome_runtime() -> Dict[str, object]:
+    chromium_binary = first_existing_executable(
         [
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/usr/bin/google-chrome",
             "/usr/bin/google-chrome-stable",
         ]
-    ) or first_executable(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"])
+    ) or first_path_from_which(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"])
 
-    chromedriver_binary = first_existing_path(
+    chromedriver_binary = first_existing_executable(
         [
             "/usr/bin/chromedriver",
             "/usr/lib/chromium/chromedriver",
             "/usr/lib/chromium-browser/chromedriver",
+            "/snap/bin/chromium.chromedriver",
         ]
-    ) or first_executable(["chromedriver"])
+    ) or first_path_from_which(["chromedriver"])
+
+    diagnostics = {
+        "app_version": APP_VERSION,
+        "cwd": os.getcwd(),
+        "python": shell_output(["python", "--version"]),
+        "which_chromium": shell_output(["/bin/sh", "-lc", "which chromium || true"]),
+        "which_chromium_browser": shell_output(["/bin/sh", "-lc", "which chromium-browser || true"]),
+        "which_chromedriver": shell_output(["/bin/sh", "-lc", "which chromedriver || true"]),
+        "ls_usr_bin_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/bin/chromium /usr/bin/chromedriver 2>&1 || true"]),
+        "dpkg_chromium": shell_output(["/bin/sh", "-lc", "dpkg -l | grep -E 'chromium|chromedriver|chrome' || true"]),
+        "selenium_cache": shell_output(["/bin/sh", "-lc", "ls -la /home/appuser/.cache/selenium 2>&1 || true"]),
+    }
 
     return {
         "chromium_binary": chromium_binary,
         "chromedriver_binary": chromedriver_binary,
-        "chromium_version": run_version_command(chromium_binary),
-        "chromedriver_version": run_version_command(chromedriver_binary),
+        "chromium_version": version_of(chromium_binary),
+        "chromedriver_version": version_of(chromedriver_binary),
+        "diagnostics": diagnostics,
     }
 
 
-def build_chrome_options() -> Options:
-    paths = get_chrome_paths()
+def validate_chrome_runtime() -> Dict[str, object]:
+    runtime = get_chrome_runtime()
+    chromium_binary = runtime.get("chromium_binary")
+    chromedriver_binary = runtime.get("chromedriver_binary")
+
+    if not chromium_binary or not chromedriver_binary:
+        missing = []
+        if not chromium_binary:
+            missing.append("chromium")
+        if not chromedriver_binary:
+            missing.append("chromedriver")
+        raise RuntimeError(
+            "Streamlit Cloud 没有检测到系统浏览器依赖："
+            + ", ".join(missing)
+            + "。请确认 packages.txt 在 GitHub repo 根目录，内容必须是两行：chromium 和 chromium-driver。"
+            + " 修复后必须 Reboot app / Clear cache / 重新部署。"
+        )
+
+    return runtime
+
+
+def build_chrome_options(chromium_binary: str) -> Options:
     chrome_options = Options()
-
-    if paths.get("chromium_binary"):
-        chrome_options.binary_location = str(paths["chromium_binary"])
-
+    chrome_options.binary_location = chromium_binary
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -223,6 +275,8 @@ def build_chrome_options() -> Options:
     chrome_options.add_argument("--metrics-recording-only")
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--disable-setuid-sandbox")
+    chrome_options.add_argument("--single-process")
     chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -238,17 +292,15 @@ def build_chrome_options() -> Options:
 
 
 def init_driver() -> webdriver.Chrome:
-    paths = get_chrome_paths()
-    chrome_options = build_chrome_options()
+    runtime = validate_chrome_runtime()
+    chromium_binary = str(runtime["chromium_binary"])
+    chromedriver_binary = str(runtime["chromedriver_binary"])
 
-    if paths.get("chromedriver_binary"):
-        service = Service(executable_path=str(paths["chromedriver_binary"]))
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        # Fallback for local machines where Selenium Manager works.
-        # On Streamlit Cloud this should not be used; install chromium-driver instead.
-        driver = webdriver.Chrome(options=chrome_options)
-
+    # CRITICAL: always pass Service(executable_path=...).
+    # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
+    service = Service(executable_path=chromedriver_binary)
+    chrome_options = build_chrome_options(chromium_binary)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(75)
     return driver
 
@@ -269,8 +321,7 @@ def parse_price_to_int(text: str) -> Optional[int]:
 
 
 def normalize_room_name(name: str) -> str:
-    name = re.sub(r"\s+", " ", name or "").strip()
-    return name
+    return re.sub(r"\s+", " ", name or "").strip()
 
 
 def looks_like_room_name(name: str) -> bool:
@@ -292,7 +343,6 @@ def format_money(value: int) -> str:
 
 def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
     best_by_room: Dict[str, Dict] = {}
-
     for room in raw_rooms:
         room_name = normalize_room_name(str(room.get("room_name", "")))
         current_price = room.get("current_selling")
@@ -313,14 +363,6 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
-    """
-    Primary parser for the current 1hotels Chakra UI booking page.
-    The screenshots show:
-      - room title: h3.chakra-card__title
-      - selected/current rate price: p element with text like $620
-      - previous/struck rate: s element with text like $858
-    We intentionally avoid depending on generated CSS class names such as css-10c1v88.
-    """
     script = r"""
     const priceRegex = /^\$\s*[0-9][0-9,]*/;
     const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
@@ -391,12 +433,10 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
 
 
 def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
-    """Fallback parser when JavaScript extraction returns nothing."""
     soup = BeautifulSoup(html_source, "html.parser")
     raw_rooms: List[Dict] = []
 
-    title_tags = soup.find_all(["h1", "h2", "h3", "h4"])
-    for title in title_tags:
+    for title in soup.find_all(["h1", "h2", "h3", "h4"]):
         room_name = normalize_room_name(title.get_text(" ", strip=True))
         if not looks_like_room_name(room_name):
             continue
@@ -446,7 +486,6 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6) ->
         wait = WebDriverWait(driver, wait_seconds)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
-        # Wait until at least one room-looking heading or price appears.
         try:
             wait.until(
                 lambda d: d.execute_script(
@@ -518,6 +557,8 @@ st.caption("支持 Streamlit Cloud Secrets 登录、酒店代码 dropdown、日�
 
 with st.sidebar:
     st.header("⚙️ Search Settings")
+    st.caption(f"App version: {APP_VERSION}")
+
     if st.button("LOGOUT"):
         st.session_state.authenticated = False
         st.rerun()
@@ -549,12 +590,12 @@ with st.sidebar:
     promo_code = st.text_input("Promo Code", value="")
     wait_seconds = st.slider("Browser wait seconds", 15, 75, 35, 5)
 
-    with st.expander("Chrome runtime check"):
-        chrome_paths = get_chrome_paths()
-        st.write("Chromium:", chrome_paths.get("chromium_binary") or "not found")
-        st.write("Chromedriver:", chrome_paths.get("chromedriver_binary") or "not found")
-        st.caption(chrome_paths.get("chromium_version") or "")
-        st.caption(chrome_paths.get("chromedriver_version") or "")
+    with st.expander("Chrome runtime check", expanded=True):
+        runtime = get_chrome_runtime()
+        st.write("Chromium:", runtime.get("chromium_binary") or "not found")
+        st.write("Chromedriver:", runtime.get("chromedriver_binary") or "not found")
+        st.caption(str(runtime.get("chromium_version") or ""))
+        st.caption(str(runtime.get("chromedriver_version") or ""))
 
 if checkout <= checkin:
     st.error("Check-out 日期必须晚于 Check-in 日期。")
@@ -616,19 +657,15 @@ if search_clicked:
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
                 st.success(f"抓取完成：解析到 {len(rooms)} 个房型。")
-        except WebDriverException as exc:
-            chrome_paths = get_chrome_paths()
-            st.session_state.last_error = str(exc)
-            st.error(f"浏览器启动或运行失败: {exc}")
-            st.warning(
-                "如果在 Streamlit Cloud 上运行，请确认 repo 根目录有 packages.txt，"
-                "内容至少包含 chromium 和 chromium-driver，然后重启/重新部署 app。"
-            )
-            with st.expander("Debug: Chrome paths and versions"):
-                st.json(chrome_paths)
         except Exception as exc:
             st.session_state.last_error = str(exc)
-            st.error(f"运行中发生错误: {exc}")
+            st.error(f"浏览器启动或运行失败: {exc}")
+            with st.expander("Debug: Chrome runtime diagnostics", expanded=True):
+                st.json(get_chrome_runtime())
+            st.warning(
+                "重点：如果错误里还出现 /home/appuser/.cache/selenium/chromedriver，"
+                "说明 Streamlit 跑的仍然不是这个 hard-fixed 版本，或者 app 没有重启成功。"
+            )
 
 left, right = st.columns([1.15, 1])
 with left:
