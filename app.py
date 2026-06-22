@@ -26,7 +26,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback"
+APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback currency-label-fix"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -71,7 +71,7 @@ ROOM_NAME_HINTS = (
     "balcony",
 )
 
-PRICE_RE = re.compile(r"\$\s*([0-9][0-9,]*)")
+PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*(?P<amount>[0-9][0-9,]*)")
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
@@ -410,16 +410,25 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
 # ============================================================
 # Parsing helpers
 # ============================================================
-def parse_price_to_int(text: str) -> Optional[int]:
+def parse_price_match(text: str) -> Optional[Dict[str, object]]:
     if not text:
         return None
     match = PRICE_RE.search(text.replace("\xa0", " "))
     if not match:
         return None
     try:
-        return int(match.group(1).replace(",", ""))
+        amount = int(match.group("amount").replace(",", ""))
     except ValueError:
         return None
+    symbol = str(match.group("symbol") or "$")
+    return {"amount": amount, "symbol": symbol}
+
+
+def parse_price_to_int(text: str) -> Optional[int]:
+    parsed = parse_price_match(text)
+    if not parsed:
+        return None
+    return int(parsed["amount"])
 
 
 def normalize_room_name(name: str) -> str:
@@ -439,8 +448,17 @@ def discount_price(current_price: int, discount_percent: float) -> int:
     return int(round(discounted))
 
 
-def format_money(value: int) -> str:
-    return f"${value:,}"
+def format_money(value: int, currency_symbol: str = "$") -> str:
+    symbol = currency_symbol or "$"
+    return f"{symbol}{value:,}"
+
+
+def escape_streamlit_label(text: str) -> str:
+    # Streamlit checkbox labels render Markdown, so a literal dollar sign can be
+    # interpreted as a math delimiter. Escaping it keeps the scraped currency
+    # symbol visible in Room Type Selection while preserving the normal symbol
+    # in generated emails and CSV output.
+    return (text or "").replace("$", r"\$")
 
 
 def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
@@ -458,6 +476,7 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
             best_by_room[key] = {
                 "room_name": room_name,
                 "current_selling": current_price,
+                "currency_symbol": str(room.get("currency_symbol") or "$"),
                 "all_detected_prices": sorted(set(room.get("all_detected_prices", [current_price]))),
             }
 
@@ -466,7 +485,7 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     script = r"""
-    const priceRegex = /^\$\s*[0-9][0-9,]*/;
+    const priceRegex = /^([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/;
     const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
     const rows = [];
 
@@ -504,24 +523,28 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
         if (!priceRegex.test(text)) continue;
         if (/amenity|fee|tax|total|include/i.test(text)) continue;
 
-        const match = text.match(/\$\s*([0-9][0-9,]*)/);
+        const match = text.match(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*([0-9][0-9,]*)/);
         if (!match) continue;
-        const value = parseInt(match[1].replace(/,/g, ''), 10);
+        const symbol = match[1] || '$';
+        const value = parseInt(match[2].replace(/,/g, ''), 10);
         if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
 
-        allPrices.push(value);
+        allPrices.push({value, symbol});
         if (node.tagName.toLowerCase() === 'p') {
-          pPrices.push(value);
+          pPrices.push({value, symbol});
         }
       }
 
       const candidatePrices = pPrices.length ? pPrices : allPrices;
       if (!candidatePrices.length) continue;
 
+      const bestPrice = candidatePrices.reduce((best, item) => item.value < best.value ? item : best, candidatePrices[0]);
+
       rows.push({
         room_name: roomName,
-        current_selling: Math.min(...candidatePrices),
-        all_detected_prices: Array.from(new Set(allPrices)).sort((a, b) => a - b),
+        current_selling: bestPrice.value,
+        currency_symbol: bestPrice.symbol || '$',
+        all_detected_prices: Array.from(new Set(allPrices.map(item => item.value))).sort((a, b) => a - b),
       });
     }
 
@@ -551,28 +574,33 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
         if card is None:
             continue
 
-        p_prices: List[int] = []
-        all_prices: List[int] = []
+        p_prices: List[Dict[str, object]] = []
+        all_prices: List[Dict[str, object]] = []
         for node in card.find_all(["p", "span", "div", "label"]):
             text = node.get_text(" ", strip=True)
             if not text or not PRICE_RE.search(text):
                 continue
             if re.search(r"amenity|fee|tax|total|include", text, re.I):
                 continue
-            price = parse_price_to_int(text)
-            if price is None or price <= 0 or price > 20000:
+            parsed_price = parse_price_match(text)
+            if not parsed_price:
                 continue
-            all_prices.append(price)
+            price = int(parsed_price["amount"])
+            if price <= 0 or price > 20000:
+                continue
+            all_prices.append(parsed_price)
             if node.name == "p":
-                p_prices.append(price)
+                p_prices.append(parsed_price)
 
         candidate_prices = p_prices or all_prices
         if candidate_prices:
+            best_price = min(candidate_prices, key=lambda item: int(item["amount"]))
             raw_rooms.append(
                 {
                     "room_name": room_name,
-                    "current_selling": min(candidate_prices),
-                    "all_detected_prices": sorted(set(all_prices)),
+                    "current_selling": int(best_price["amount"]),
+                    "currency_symbol": str(best_price.get("symbol") or "$"),
+                    "all_detected_prices": sorted(set(int(item["amount"]) for item in all_prices)),
                 }
             )
 
@@ -597,7 +625,7 @@ def scrape_1hotels_once(
             wait.until(
                 lambda d: d.execute_script(
                     "return document.body && "
-                    "(/\\$\\s*[0-9]/.test(document.body.innerText || '') || "
+                    "(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\\s*[0-9]/.test(document.body.innerText || '') || "
                     "document.querySelectorAll('h2,h3,h4').length > 0);"
                 )
             )
@@ -694,11 +722,24 @@ def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
         current = int(room["current_selling"])
         best = discount_price(current, discount_percent)
         room_name = room["room_name"]
+        currency_symbol = str(room.get("currency_symbol") or "$")
         lines.append(
-            f"▫{room_name} | Best offer: {format_money(best)} per night. "
-            f"(Currently selling: {format_money(current)})"
+            f"▫{room_name} | Best offer: {format_money(best, currency_symbol)} per night. "
+            f"(Currently selling: {format_money(current, currency_symbol)})"
         )
     return lines
+
+
+def build_selection_label(room: Dict, discount_percent: float) -> str:
+    current = int(room["current_selling"])
+    best = discount_price(current, discount_percent)
+    room_name = room["room_name"]
+    currency_symbol = str(room.get("currency_symbol") or "$")
+    label = (
+        f"{room_name} | Best offer: {format_money(best, currency_symbol)} per night. "
+        f"(Currently selling: {format_money(current, currency_symbol)})"
+    )
+    return escape_streamlit_label(label)
 
 
 def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.DataFrame:
@@ -709,10 +750,10 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
         rows.append(
             {
                 "Room Type": room["room_name"],
-                "Best offer": format_money(best),
-                "Currently selling": format_money(current),
+                "Best offer": format_money(best, str(room.get("currency_symbol") or "$")),
+                "Currently selling": format_money(current, str(room.get("currency_symbol") or "$")),
                 "Discount % Off": f"{discount_percent:g}%",
-                "Detected prices": ", ".join(format_money(x) for x in room.get("all_detected_prices", [])),
+                "Detected prices": ", ".join(format_money(x, str(room.get("currency_symbol") or "$")) for x in room.get("all_detected_prices", [])),
             }
         )
     return pd.DataFrame(rows)
@@ -816,6 +857,19 @@ def render_copy_button(text_to_copy: str) -> None:
 # ============================================================
 st.title("🏨 Starwood Hotel Rateshop")
 st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, selectable room quotes, and email-ready output.")
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stCheckbox"] label p {
+        font-size: 1.04rem !important;
+        font-weight: 700 !important;
+        line-height: 1.35 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.header("⚙️ Search Settings")
@@ -972,7 +1026,7 @@ if rooms_for_selection:
             st.rerun()
 
     for index, room in enumerate(rooms_for_selection):
-        line = build_output_lines([room], discount_percent)[0]
+        line = build_selection_label(room, discount_percent)
         room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
         st.checkbox(line, key=room_key)
 else:
@@ -1002,13 +1056,10 @@ with email_right:
 
 save_user_preferences()
 
-email_header_col, email_button_col, copy_button_col = st.columns([5, 1, 1])
-with email_header_col:
-    st.subheader("Generated Email")
+st.subheader("Generated Email")
+email_button_col, email_button_spacer = st.columns([1, 5])
 with email_button_col:
     email_clicked = st.button("EMAIL", type="primary", use_container_width=True)
-with copy_button_col:
-    render_copy_button(st.session_state.generated_email)
 
 if email_clicked or st.session_state.generated_email:
     selected_lines = get_selected_room_lines(st.session_state.last_rooms, discount_percent)
@@ -1028,6 +1079,9 @@ st.text_area(
     height=420,
     label_visibility="collapsed",
 )
+copy_button_col, copy_button_spacer = st.columns([1, 5])
+with copy_button_col:
+    render_copy_button(st.session_state.generated_email)
 
 st.divider()
 st.subheader("Structured Result")
@@ -1043,31 +1097,3 @@ if not st.session_state.last_df.empty:
     )
 else:
     st.info("Click SEARCH to load structured room-rate data here.")
-
-with st.expander("Deployment files for Streamlit Cloud"):
-    st.markdown("**requirements.txt**")
-    st.code(
-        """
-streamlit
-selenium
-beautifulsoup4
-pandas
-        """.strip(),
-        language="text",
-    )
-    st.markdown("**packages.txt**")
-    st.code(
-        """
-chromium
-chromium-driver
-        """.strip(),
-        language="text",
-    )
-    st.markdown("**Streamlit Secrets**")
-    st.code(
-        """
-user_name = 123
-password = 456
-        """.strip(),
-        language="toml",
-    )
