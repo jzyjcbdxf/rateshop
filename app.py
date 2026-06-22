@@ -425,7 +425,7 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
     service = Service(executable_path=chromedriver_binary)
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(90 if fallback_mode else 75)
+    driver.set_page_load_timeout(150 if fallback_mode else 120)
     return driver
 
 
@@ -688,8 +688,8 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, re
         try:
             result = scrape_1hotels_once(
                 url=url,
-                wait_seconds=wait_seconds + (10 if fallback_mode else 0),
-                settle_seconds=settle_seconds + (4 if fallback_mode else 0),
+                wait_seconds=wait_seconds + (30 if fallback_mode else 0),
+                settle_seconds=settle_seconds + (8 if fallback_mode else 0),
                 fallback_mode=fallback_mode,
             )
             rooms = result.get("rooms", [])
@@ -977,12 +977,13 @@ with st.sidebar:
         value=float(DEFAULT_DISCOUNT_PERCENT),
         step=1.0,
     )
+    search_clicked = st.button("SEARCH", type="primary", use_container_width=True)
     st.checkbox("Rates include tax in email quote", key="rates_include_tax")
     currency = st.selectbox("Currency", options=["USD"], index=0)
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
     promo_code = st.text_input("Promo Code", value="")
-    wait_seconds = st.slider("Browser wait seconds", 15, 75, 35, 5)
+    wait_seconds = st.slider("Browser wait seconds", 30, 180, 75, 5)
 
     with st.expander("Chrome runtime check", expanded=False):
         runtime = get_chrome_runtime()
@@ -1009,13 +1010,7 @@ target_url = build_booking_url(
     sort=sort,
 )
 
-url_col, button_col = st.columns([5, 1])
-with url_col:
-    st.text_area("Dynamic URL", value=target_url, height=88, disabled=True)
-with button_col:
-    st.write("")
-    st.write("")
-    search_clicked = st.button("SEARCH", type="primary", use_container_width=True)
+st.text_area("Dynamic URL", value=target_url, height=88, disabled=True)
 
 email_clicked = False
 
@@ -1031,9 +1026,14 @@ if "generated_email" not in st.session_state:
     st.session_state.generated_email = ""
 
 if search_clicked:
-    with st.spinner("Starting the headless browser and fetching live rates. This usually takes 20-45 seconds..."):
+    room_nights_for_search = max((checkout - checkin).days, 1)
+    adaptive_wait_seconds = int(min(180, max(int(wait_seconds), 75 + room_nights_for_search * 5)))
+    with st.spinner(
+        f"Starting the headless browser and fetching live rates. Long date ranges may take longer. "
+        f"Timeout window: {adaptive_wait_seconds}s before fallback retry."
+    ):
         try:
-            result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds), retry_once=True)
+            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
