@@ -1,8 +1,10 @@
+import html
 import math
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -10,6 +12,7 @@ from urllib.parse import urlencode
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -23,7 +26,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood Hotel Rateshop selectable email quotes"
+APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -71,6 +74,26 @@ ROOM_NAME_HINTS = (
 PRICE_RE = re.compile(r"\$\s*([0-9][0-9,]*)")
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stCheckbox"] label p {
+        font-size: 18px !important;
+        font-weight: 700 !important;
+        line-height: 1.35 !important;
+    }
+    div[data-testid="stCheckbox"] label {
+        align-items: flex-start !important;
+        gap: 0.45rem !important;
+    }
+    div[data-testid="stCheckbox"] {
+        margin-bottom: 0.25rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -324,10 +347,27 @@ def validate_chrome_runtime() -> Dict[str, object]:
     return runtime
 
 
-def build_chrome_options(chromium_binary: str) -> Options:
+def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> Options:
     chrome_options = Options()
     chrome_options.binary_location = chromium_binary
-    chrome_options.add_argument("--headless=new")
+
+    # Use a fresh Chrome profile on every attempt. This avoids profile-lock issues on
+    # Streamlit Cloud when a previous browser process exits slowly or crashes.
+    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
+
+    if fallback_mode:
+        # Fallback mode is intentionally more conservative. It avoids --single-process
+        # and uses a random remote debugging port, which helps when the first browser
+        # startup or page load is flaky in Streamlit Cloud.
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--remote-debugging-port=0")
+        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    else:
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--single-process")
+
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -340,8 +380,6 @@ def build_chrome_options(chromium_binary: str) -> Options:
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
     chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--single-process")
-    chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
@@ -355,7 +393,7 @@ def build_chrome_options(chromium_binary: str) -> Options:
     return chrome_options
 
 
-def init_driver() -> webdriver.Chrome:
+def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
     runtime = validate_chrome_runtime()
     chromium_binary = str(runtime["chromium_binary"])
     chromedriver_binary = str(runtime["chromedriver_binary"])
@@ -363,9 +401,9 @@ def init_driver() -> webdriver.Chrome:
     # CRITICAL: always pass Service(executable_path=...).
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
     service = Service(executable_path=chromedriver_binary)
-    chrome_options = build_chrome_options(chromium_binary)
+    chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(75)
+    driver.set_page_load_timeout(90 if fallback_mode else 75)
     return driver
 
 
@@ -541,10 +579,15 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
     return raw_rooms
 
 
-def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6) -> Dict:
+def scrape_1hotels_once(
+    url: str,
+    wait_seconds: int = 35,
+    settle_seconds: int = 6,
+    fallback_mode: bool = False,
+) -> Dict:
     driver = None
     try:
-        driver = init_driver()
+        driver = init_driver(fallback_mode=fallback_mode)
         driver.get(url)
 
         wait = WebDriverWait(driver, wait_seconds)
@@ -577,10 +620,72 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6) ->
             "raw_count": len(raw_rooms),
             "page_text_preview": page_text[:3500],
             "html_preview": html_source[:3500],
+            "attempt_mode": "fallback" if fallback_mode else "primary",
         }
     finally:
         if driver is not None:
             driver.quit()
+
+
+def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, retry_once: bool = True) -> Dict:
+    attempts = [False, True] if retry_once else [False]
+    history: List[Dict[str, object]] = []
+    last_result: Optional[Dict] = None
+    last_exception: Optional[Exception] = None
+
+    for attempt_index, fallback_mode in enumerate(attempts, start=1):
+        mode_name = "fallback" if fallback_mode else "primary"
+        try:
+            result = scrape_1hotels_once(
+                url=url,
+                wait_seconds=wait_seconds + (10 if fallback_mode else 0),
+                settle_seconds=settle_seconds + (4 if fallback_mode else 0),
+                fallback_mode=fallback_mode,
+            )
+            rooms = result.get("rooms", [])
+            history.append(
+                {
+                    "attempt": attempt_index,
+                    "mode": mode_name,
+                    "status": "ok",
+                    "rooms_count": len(rooms),
+                }
+            )
+            result["retry_history"] = history
+            last_result = result
+
+            if rooms:
+                return result
+
+            # A loaded page with zero parsed rooms is treated as a soft failure.
+            # Retry once with fallback browser flags and a longer settle time.
+            if attempt_index < len(attempts):
+                time.sleep(2)
+                continue
+
+            return result
+        except Exception as exc:
+            last_exception = exc
+            history.append(
+                {
+                    "attempt": attempt_index,
+                    "mode": mode_name,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            if attempt_index < len(attempts):
+                time.sleep(2)
+                continue
+
+    if last_result is not None:
+        last_result["retry_history"] = history
+        return last_result
+
+    raise RuntimeError(
+        "Primary search failed and fallback retry also failed. "
+        f"Retry history: {history}. Last error: {last_exception}"
+    ) from last_exception
 
 
 def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
@@ -661,6 +766,51 @@ def build_email_body(
     return "\n\n".join(parts)
 
 
+def render_copy_button(text_to_copy: str) -> None:
+    escaped_text = html.escape(text_to_copy or "")
+    components.html(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; height:42px;">
+            <textarea id="email-copy-source" style="position:absolute; left:-9999px; top:-9999px;">{escaped_text}</textarea>
+            <button
+                id="copy-email-button"
+                style="
+                    width:100%;
+                    height:38px;
+                    border:1px solid #c9c9c9;
+                    border-radius:0.5rem;
+                    background:#ffffff;
+                    color:#262730;
+                    font-weight:700;
+                    cursor:pointer;
+                "
+                onclick="
+                    const source = document.getElementById('email-copy-source');
+                    const button = document.getElementById('copy-email-button');
+                    navigator.clipboard.writeText(source.value).then(function() {{
+                        button.innerText = 'Copied';
+                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
+                    }}).catch(function() {{
+                        source.style.position = 'fixed';
+                        source.style.left = '0';
+                        source.style.top = '0';
+                        source.focus();
+                        source.select();
+                        document.execCommand('copy');
+                        source.style.position = 'absolute';
+                        source.style.left = '-9999px';
+                        source.style.top = '-9999px';
+                        button.innerText = 'Copied';
+                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
+                    }});
+                "
+            >Copy</button>
+        </div>
+        """,
+        height=46,
+    )
+
+
 # ============================================================
 # UI
 # ============================================================
@@ -698,7 +848,7 @@ with st.sidebar:
         value=float(DEFAULT_DISCOUNT_PERCENT),
         step=1.0,
     )
-    st.checkbox("Rates include tax", key="rates_include_tax")
+    st.checkbox("Rates include tax in email quote", key="rates_include_tax")
     currency = st.selectbox("Currency", options=["USD"], index=0)
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
@@ -737,13 +887,8 @@ with button_col:
     st.write("")
     st.write("")
     search_clicked = st.button("SEARCH", type="primary", use_container_width=True)
-    email_clicked = st.button("EMAIL", use_container_width=True)
 
-rate_tax_word = "including" if st.session_state.rates_include_tax else "excluding"
-st.markdown(
-    "**Rates are fully pre-paid and non-refundable.** "
-    f"**{discount_percent:g}% OFF** · **Rates {rate_tax_word} tax**"
-)
+email_clicked = False
 
 if "last_output_text" not in st.session_state:
     st.session_state.last_output_text = ""
@@ -759,9 +904,19 @@ if "generated_email" not in st.session_state:
 if search_clicked:
     with st.spinner("Starting the headless browser and fetching live rates. This usually takes 20-45 seconds..."):
         try:
-            result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds))
+            result = scrape_1hotels(target_url, wait_seconds=int(wait_seconds), retry_once=True)
             rooms = result.get("rooms", [])
+            retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
+
+            used_fallback = any(item.get("mode") == "fallback" and item.get("status") == "ok" for item in retry_history)
+            primary_failed_or_empty = bool(
+                retry_history
+                and (
+                    retry_history[0].get("status") == "failed"
+                    or int(retry_history[0].get("rooms_count", 0) or 0) == 0
+                )
+            )
 
             if not rooms:
                 st.session_state.last_output_text = ""
@@ -772,7 +927,11 @@ if search_clicked:
                     st.text(result.get("page_text_preview", "")[:3500])
                 with st.expander("Debug: HTML preview"):
                     st.code(result.get("html_preview", "")[:3500], language="html")
+                with st.expander("Debug: retry history"):
+                    st.json(retry_history)
             else:
+                if used_fallback and primary_failed_or_empty:
+                    st.warning("The primary search attempt failed or returned no rooms. Fallback retry succeeded automatically.")
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
@@ -782,6 +941,8 @@ if search_clicked:
                     room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
                     st.session_state[room_key] = False
                 st.success(f"Search completed: parsed {len(rooms)} room type(s).")
+                with st.expander("Debug: retry history", expanded=False):
+                    st.json(retry_history)
         except Exception as exc:
             st.session_state.last_error = str(exc)
             st.error(f"Browser startup or runtime failed: {exc}")
@@ -792,47 +953,30 @@ if search_clicked:
                 "Streamlit is still running an older app.py, or the app was not rebooted successfully."
             )
 
-left, right = st.columns([1.15, 1])
-with left:
-    st.subheader("Room Type Selection")
-    rooms_for_selection = st.session_state.last_rooms
-    if rooms_for_selection:
-        st.caption("Select the room type(s) you want to include in the email quote.")
-        select_all_col, clear_all_col = st.columns(2)
-        with select_all_col:
-            if st.button("Select all room types", use_container_width=True):
-                for index, room in enumerate(rooms_for_selection):
-                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
-                    st.session_state[room_key] = True
-                st.rerun()
-        with clear_all_col:
-            if st.button("Clear selections", use_container_width=True):
-                for index, room in enumerate(rooms_for_selection):
-                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
-                    st.session_state[room_key] = False
-                st.rerun()
+st.subheader("Room Type Selection")
+rooms_for_selection = st.session_state.last_rooms
+if rooms_for_selection:
+    st.caption("Select the room type(s) you want to include in the email quote.")
+    select_all_col, clear_all_col, spacer_col = st.columns([1, 1, 3])
+    with select_all_col:
+        if st.button("Select all room types", use_container_width=True):
+            for index, room in enumerate(rooms_for_selection):
+                room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                st.session_state[room_key] = True
+            st.rerun()
+    with clear_all_col:
+        if st.button("Clear selections", use_container_width=True):
+            for index, room in enumerate(rooms_for_selection):
+                room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                st.session_state[room_key] = False
+            st.rerun()
 
-        for index, room in enumerate(rooms_for_selection):
-            line = build_output_lines([room], discount_percent)[0]
-            room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
-            st.checkbox(line, key=room_key)
-    else:
-        st.info("Click SEARCH to load room types and live rates here.")
-
-with right:
-    st.subheader("Structured Result")
-    if not st.session_state.last_df.empty:
-        st.dataframe(st.session_state.last_df, use_container_width=True, hide_index=True)
-        csv_data = st.session_state.last_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="Download CSV",
-            data=csv_data,
-            file_name=f"starwood_{hotel_key}_{checkin}_{checkout}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    else:
-        st.info("Click SEARCH to load room types and live rates here.")
+    for index, room in enumerate(rooms_for_selection):
+        line = build_output_lines([room], discount_percent)[0]
+        room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+        st.checkbox(line, key=room_key)
+else:
+    st.info("Click SEARCH to load room types and live rates here.")
 
 st.divider()
 
@@ -858,7 +1002,15 @@ with email_right:
 
 save_user_preferences()
 
-if email_clicked:
+email_header_col, email_button_col, copy_button_col = st.columns([5, 1, 1])
+with email_header_col:
+    st.subheader("Generated Email")
+with email_button_col:
+    email_clicked = st.button("EMAIL", type="primary", use_container_width=True)
+with copy_button_col:
+    render_copy_button(st.session_state.generated_email)
+
+if email_clicked or st.session_state.generated_email:
     selected_lines = get_selected_room_lines(st.session_state.last_rooms, discount_percent)
     st.session_state.generated_email = build_email_body(
         opening=st.session_state.email_opening,
@@ -870,13 +1022,27 @@ if email_clicked:
     )
     save_user_preferences()
 
-st.subheader("Generated Email")
 st.text_area(
     "Email Output",
     value=st.session_state.generated_email,
     height=420,
     label_visibility="collapsed",
 )
+
+st.divider()
+st.subheader("Structured Result")
+if not st.session_state.last_df.empty:
+    st.dataframe(st.session_state.last_df, use_container_width=True, hide_index=True)
+    csv_data = st.session_state.last_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="Download CSV",
+        data=csv_data,
+        file_name=f"starwood_{hotel_key}_{checkin}_{checkout}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+else:
+    st.info("Click SEARCH to load structured room-rate data here.")
 
 with st.expander("Deployment files for Streamlit Cloud"):
     st.markdown("**requirements.txt**")
