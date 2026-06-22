@@ -26,7 +26,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback element-currency-fix"
+APP_VERSION = "2026-06-22 Starwood Hotel Rateshop retry-once fallback currency-label-fix"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -71,7 +71,7 @@ ROOM_NAME_HINTS = (
     "balcony",
 )
 
-PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|CHF|AED|HKD|SGD|MXN|BRL)\s*(?P<amount>[0-9][0-9,]*)")
+PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*(?P<amount>[0-9][0-9,]*)")
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
@@ -420,7 +420,7 @@ def parse_price_match(text: str) -> Optional[Dict[str, object]]:
         amount = int(match.group("amount").replace(",", ""))
     except ValueError:
         return None
-    symbol = str(match.group("symbol") or "").strip()
+    symbol = str(match.group("symbol") or "$")
     return {"amount": amount, "symbol": symbol}
 
 
@@ -448,10 +448,9 @@ def discount_price(current_price: int, discount_percent: float) -> int:
     return int(round(discounted))
 
 
-def format_money(value: int, currency_symbol: str = "") -> str:
-    # Currency must come from the scraped page element, not from a hardcoded default.
-    symbol = (currency_symbol or "").strip()
-    return f"{symbol}{value:,}" if symbol else f"{value:,}"
+def format_money(value: int, currency_symbol: str = "$") -> str:
+    symbol = currency_symbol or "$"
+    return f"{symbol}{value:,}"
 
 
 def escape_streamlit_label(text: str) -> str:
@@ -477,7 +476,7 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
             best_by_room[key] = {
                 "room_name": room_name,
                 "current_selling": current_price,
-                "currency_symbol": str(room.get("currency_symbol") or "").strip(),
+                "currency_symbol": str(room.get("currency_symbol") or "$"),
                 "all_detected_prices": sorted(set(room.get("all_detected_prices", [current_price]))),
             }
 
@@ -486,7 +485,7 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     script = r"""
-    const priceRegex = /^([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|CHF|AED|HKD|SGD|MXN|BRL)\s*[0-9][0-9,]*/;
+    const priceRegex = /^([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/;
     const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
     const rows = [];
 
@@ -524,9 +523,9 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
         if (!priceRegex.test(text)) continue;
         if (/amenity|fee|tax|total|include/i.test(text)) continue;
 
-        const match = text.match(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|CHF|AED|HKD|SGD|MXN|BRL)\s*([0-9][0-9,]*)/);
+        const match = text.match(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*([0-9][0-9,]*)/);
         if (!match) continue;
-        const symbol = (match[1] || '').trim();
+        const symbol = match[1] || '$';
         const value = parseInt(match[2].replace(/,/g, ''), 10);
         if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
 
@@ -544,7 +543,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
       rows.push({
         room_name: roomName,
         current_selling: bestPrice.value,
-        currency_symbol: (bestPrice.symbol || '').trim(),
+        currency_symbol: bestPrice.symbol || '$',
         all_detected_prices: Array.from(new Set(allPrices.map(item => item.value))).sort((a, b) => a - b),
       });
     }
@@ -600,7 +599,7 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
                 {
                     "room_name": room_name,
                     "current_selling": int(best_price["amount"]),
-                    "currency_symbol": str(best_price.get("symbol") or "").strip(),
+                    "currency_symbol": str(best_price.get("symbol") or "$"),
                     "all_detected_prices": sorted(set(int(item["amount"]) for item in all_prices)),
                 }
             )
@@ -723,7 +722,7 @@ def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
         current = int(room["current_selling"])
         best = discount_price(current, discount_percent)
         room_name = room["room_name"]
-        currency_symbol = str(room.get("currency_symbol") or "").strip()
+        currency_symbol = str(room.get("currency_symbol") or "$")
         lines.append(
             f"▫{room_name} | Best offer: {format_money(best, currency_symbol)} per night. "
             f"(Currently selling: {format_money(current, currency_symbol)})"
@@ -735,7 +734,7 @@ def build_selection_label(room: Dict, discount_percent: float) -> str:
     current = int(room["current_selling"])
     best = discount_price(current, discount_percent)
     room_name = room["room_name"]
-    currency_symbol = str(room.get("currency_symbol") or "").strip()
+    currency_symbol = str(room.get("currency_symbol") or "$")
     label = (
         f"{room_name} | Best offer: {format_money(best, currency_symbol)} per night. "
         f"(Currently selling: {format_money(current, currency_symbol)})"
@@ -751,10 +750,10 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
         rows.append(
             {
                 "Room Type": room["room_name"],
-                "Best offer": format_money(best, str(room.get("currency_symbol") or "").strip()),
-                "Currently selling": format_money(current, str(room.get("currency_symbol") or "").strip()),
+                "Best offer": format_money(best, str(room.get("currency_symbol") or "$")),
+                "Currently selling": format_money(current, str(room.get("currency_symbol") or "$")),
                 "Discount % Off": f"{discount_percent:g}%",
-                "Detected prices": ", ".join(format_money(x, str(room.get("currency_symbol") or "").strip()) for x in room.get("all_detected_prices", [])),
+                "Detected prices": ", ".join(format_money(x, str(room.get("currency_symbol") or "$")) for x in room.get("all_detected_prices", [])),
             }
         )
     return pd.DataFrame(rows)
