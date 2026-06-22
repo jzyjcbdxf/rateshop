@@ -23,13 +23,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood hard-fixed no Selenium Manager fallback"
+APP_VERSION = "2026-06-22 Starwood Hotel Rateshop selectable email quotes"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, str] = {
     "1SB": "60507",
+    "1CP": "60735",
+    "1BB": "66266",
+    "1TY": "96185",
+    "1ML": "47157",
+    "1MF": "40333",
+    "1HNB": "5826",
+    "1CPH": "41069",
+    "1NV": "35903",
+    "1SF": "36017",
+    "1SE": "47314",
+    "1TO": "31116",
+    "1WH": "77961",
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
@@ -58,7 +70,7 @@ ROOM_NAME_HINTS = (
 
 PRICE_RE = re.compile(r"\$\s*([0-9][0-9,]*)")
 
-st.set_page_config(page_title="Starwood Rate Monitor", layout="wide")
+st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
 
 # ============================================================
@@ -93,7 +105,7 @@ def login_required() -> None:
     if st.session_state.authenticated:
         return
 
-    st.title("🔐 Starwood Rate Tool Login")
+    st.title("🔐 Starwood Hotel Rateshop Login")
     with st.form("login_form", clear_on_submit=False):
         user_name = st.text_input("User Name")
         password = st.text_input("Password", type="password")
@@ -102,6 +114,7 @@ def login_required() -> None:
     if submitted:
         if user_name == expected_user_name and password == expected_password:
             st.session_state.authenticated = True
+            st.session_state.authenticated_user_name = user_name
             st.rerun()
         else:
             st.error("Invalid username or password.")
@@ -110,6 +123,54 @@ def login_required() -> None:
 
 
 login_required()
+
+
+# ============================================================
+# User preference cache
+# This is process-level cache for Streamlit reruns while the app process is alive.
+# ============================================================
+@st.cache_resource(show_spinner=False)
+def get_preference_cache() -> Dict[str, Dict[str, object]]:
+    return {}
+
+
+def default_ending_text() -> str:
+    valid_until = date.today() + timedelta(days=3)
+    return (
+        f"This quote is valid until {valid_until.isoformat()}. Change in stay date will result in new pricing.\n"
+        "Rates are fully pre-paid and non-refundable. 100% room, tax and resort fee are charged at time of booking.\n\n"
+        "Please let us know which room type would you like to choose."
+    )
+
+
+def get_current_user_key() -> str:
+    return str(st.session_state.get("authenticated_user_name") or get_secret_value("user_name") or "default_user")
+
+
+def load_user_preferences_once() -> None:
+    user_key = get_current_user_key()
+    cache = get_preference_cache()
+    prefs = cache.get(user_key, {})
+
+    if "email_opening" not in st.session_state:
+        st.session_state.email_opening = str(prefs.get("email_opening", ""))
+    if "email_ending" not in st.session_state:
+        st.session_state.email_ending = str(prefs.get("email_ending", default_ending_text()))
+    if "rates_include_tax" not in st.session_state:
+        st.session_state.rates_include_tax = bool(prefs.get("rates_include_tax", False))
+
+
+def save_user_preferences() -> None:
+    user_key = get_current_user_key()
+    cache = get_preference_cache()
+    cache[user_key] = {
+        "email_opening": st.session_state.get("email_opening", ""),
+        "email_ending": st.session_state.get("email_ending", default_ending_text()),
+        "rates_include_tax": bool(st.session_state.get("rates_include_tax", False)),
+    }
+
+
+load_user_preferences_once()
 
 
 # ============================================================
@@ -552,18 +613,68 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def get_selected_room_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
+    selected_rooms = []
+    for index, room in enumerate(rooms):
+        key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+        if st.session_state.get(key, False):
+            selected_rooms.append(room)
+    return build_output_lines(selected_rooms, discount_percent)
+
+
+def build_email_body(
+    opening: str,
+    ending: str,
+    checkin: date,
+    checkout: date,
+    selected_room_lines: List[str],
+    rates_include_tax: bool,
+) -> str:
+    room_nights = max((checkout - checkin).days, 1)
+    tax_phrase = "including tax" if rates_include_tax else "excluding tax"
+
+    parts: List[str] = []
+    opening_clean = (opening or "").strip()
+    ending_clean = (ending or "").strip()
+
+    if opening_clean:
+        parts.append(opening_clean)
+
+    details = [
+        "Please see options and availability for requested date below:",
+        f"Arrival: {checkin.isoformat()}",
+        f"Departure: {checkout.isoformat()}",
+        f"Room nights: {room_nights}",
+        f"Rates are per night {tax_phrase}.",
+    ]
+
+    if selected_room_lines:
+        details.extend(["", *selected_room_lines])
+    else:
+        details.extend(["", "No room type selected."])
+
+    parts.append("\n".join(details))
+
+    if ending_clean:
+        parts.append(ending_clean)
+
+    return "\n\n".join(parts)
+
+
 # ============================================================
 # UI
 # ============================================================
-st.title("🏨 Starwood Live Rate Scraper Console")
-st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, and discounted Best Offer output.")
+st.title("🏨 Starwood Hotel Rateshop")
+st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, selectable room quotes, and email-ready output.")
 
 with st.sidebar:
     st.header("⚙️ Search Settings")
     st.caption(f"App version: {APP_VERSION}")
 
     if st.button("LOGOUT"):
+        save_user_preferences()
         st.session_state.authenticated = False
+        st.session_state.pop("authenticated_user_name", None)
         st.rerun()
 
     hotel_key = st.selectbox(
@@ -587,13 +698,14 @@ with st.sidebar:
         value=float(DEFAULT_DISCOUNT_PERCENT),
         step=1.0,
     )
+    st.checkbox("Rates include tax", key="rates_include_tax")
     currency = st.selectbox("Currency", options=["USD"], index=0)
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
     promo_code = st.text_input("Promo Code", value="")
     wait_seconds = st.slider("Browser wait seconds", 15, 75, 35, 5)
 
-    with st.expander("Chrome runtime check", expanded=True):
+    with st.expander("Chrome runtime check", expanded=False):
         runtime = get_chrome_runtime()
         st.write("Chromium:", runtime.get("chromium_binary") or "not found")
         st.write("Chromedriver:", runtime.get("chromedriver_binary") or "not found")
@@ -603,6 +715,8 @@ with st.sidebar:
 if checkout <= checkin:
     st.error("Check-out date must be later than Check-in date.")
     st.stop()
+
+save_user_preferences()
 
 target_url = build_booking_url(
     hotel_code=hotel_code,
@@ -625,20 +739,22 @@ with button_col:
     search_clicked = st.button("SEARCH", type="primary", use_container_width=True)
     email_clicked = st.button("EMAIL", use_container_width=True)
 
+rate_tax_word = "including" if st.session_state.rates_include_tax else "excluding"
 st.markdown(
     "**Rates are fully pre-paid and non-refundable.** "
-    f"**{discount_percent:g}% OFF**"
+    f"**{discount_percent:g}% OFF** · **Rates {rate_tax_word} tax**"
 )
-
-if email_clicked:
-    st.info("EMAIL is reserved for a future SMTP, SendGrid, or Gmail API integration.")
 
 if "last_output_text" not in st.session_state:
     st.session_state.last_output_text = ""
 if "last_df" not in st.session_state:
     st.session_state.last_df = pd.DataFrame()
+if "last_rooms" not in st.session_state:
+    st.session_state.last_rooms = []
 if "last_error" not in st.session_state:
     st.session_state.last_error = ""
+if "generated_email" not in st.session_state:
+    st.session_state.generated_email = ""
 
 if search_clicked:
     with st.spinner("Starting the headless browser and fetching live rates. This usually takes 20-45 seconds..."):
@@ -650,6 +766,7 @@ if search_clicked:
             if not rooms:
                 st.session_state.last_output_text = ""
                 st.session_state.last_df = pd.DataFrame()
+                st.session_state.last_rooms = []
                 st.error("No room rates were parsed. The page structure may have changed, the rate component may not have loaded, or anti-bot verification may have been triggered.")
                 with st.expander("Debug: page text preview"):
                     st.text(result.get("page_text_preview", "")[:3500])
@@ -659,6 +776,11 @@ if search_clicked:
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
+                st.session_state.last_rooms = rooms
+                st.session_state.generated_email = ""
+                for index, room in enumerate(rooms):
+                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                    st.session_state[room_key] = False
                 st.success(f"Search completed: parsed {len(rooms)} room type(s).")
         except Exception as exc:
             st.session_state.last_error = str(exc)
@@ -672,13 +794,30 @@ if search_clicked:
 
 left, right = st.columns([1.15, 1])
 with left:
-    st.subheader("Search Result Text Box")
-    st.text_area(
-        "Output",
-        value=st.session_state.last_output_text,
-        height=420,
-        label_visibility="collapsed",
-    )
+    st.subheader("Room Type Selection")
+    rooms_for_selection = st.session_state.last_rooms
+    if rooms_for_selection:
+        st.caption("Select the room type(s) you want to include in the email quote.")
+        select_all_col, clear_all_col = st.columns(2)
+        with select_all_col:
+            if st.button("Select all room types", use_container_width=True):
+                for index, room in enumerate(rooms_for_selection):
+                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                    st.session_state[room_key] = True
+                st.rerun()
+        with clear_all_col:
+            if st.button("Clear selections", use_container_width=True):
+                for index, room in enumerate(rooms_for_selection):
+                    room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+                    st.session_state[room_key] = False
+                st.rerun()
+
+        for index, room in enumerate(rooms_for_selection):
+            line = build_output_lines([room], discount_percent)[0]
+            room_key = f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
+            st.checkbox(line, key=room_key)
+    else:
+        st.info("Click SEARCH to load room types and live rates here.")
 
 with right:
     st.subheader("Structured Result")
@@ -694,6 +833,50 @@ with right:
         )
     else:
         st.info("Click SEARCH to load room types and live rates here.")
+
+st.divider()
+
+email_left, email_right = st.columns([1, 1])
+with email_left:
+    st.subheader("Email Opening")
+    st.text_area(
+        "Opening",
+        key="email_opening",
+        height=150,
+        placeholder="Type the email opening here. It will be saved for your next login while the app cache is alive.",
+        label_visibility="collapsed",
+    )
+
+with email_right:
+    st.subheader("Email Ending")
+    st.text_area(
+        "Ending",
+        key="email_ending",
+        height=150,
+        label_visibility="collapsed",
+    )
+
+save_user_preferences()
+
+if email_clicked:
+    selected_lines = get_selected_room_lines(st.session_state.last_rooms, discount_percent)
+    st.session_state.generated_email = build_email_body(
+        opening=st.session_state.email_opening,
+        ending=st.session_state.email_ending,
+        checkin=checkin,
+        checkout=checkout,
+        selected_room_lines=selected_lines,
+        rates_include_tax=bool(st.session_state.rates_include_tax),
+    )
+    save_user_preferences()
+
+st.subheader("Generated Email")
+st.text_area(
+    "Email Output",
+    value=st.session_state.generated_email,
+    height=420,
+    label_visibility="collapsed",
+)
 
 with st.expander("Deployment files for Streamlit Cloud"):
     st.markdown("**requirements.txt**")
