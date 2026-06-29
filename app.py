@@ -1,4 +1,5 @@
 import html
+import json
 import math
 import os
 import re
@@ -26,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-22 Starwood Hotel Rateshop hotel-currency-map"
+APP_VERSION = "2026-06-29 Starwood Hotel Rateshop browser-local-template-cache"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -149,14 +150,11 @@ login_required()
 
 
 # ============================================================
-# User preference cache
-# This is process-level cache for Streamlit reruns while the app process is alive.
+# Browser-local user preference cache
+# Email templates are intentionally stored in each user's browser localStorage,
+# not in Streamlit server cache. This prevents one logged-in user from
+# overriding another user's Email Opening / Email Ending template.
 # ============================================================
-@st.cache_resource(show_spinner=False)
-def get_preference_cache() -> Dict[str, Dict[str, object]]:
-    return {}
-
-
 def default_ending_text() -> str:
     valid_until = date.today() + timedelta(days=3)
     return (
@@ -166,34 +164,108 @@ def default_ending_text() -> str:
     )
 
 
-def get_current_user_key() -> str:
-    return str(st.session_state.get("authenticated_user_name") or get_secret_value("user_name") or "default_user")
+def get_browser_storage_namespace() -> str:
+    """Return the browser-local namespace used for this app's saved preferences."""
+    return "starwood_rateshop_email_template_v1"
 
 
-def load_user_preferences_once() -> None:
-    user_key = get_current_user_key()
-    cache = get_preference_cache()
-    prefs = cache.get(user_key, {})
+def render_local_storage_loader() -> None:
+    """
+    Load browser localStorage into temporary URL query params once per browser tab.
 
-    if "email_opening" not in st.session_state:
-        st.session_state.email_opening = str(prefs.get("email_opening", ""))
-    if "email_ending" not in st.session_state:
-        st.session_state.email_ending = str(prefs.get("email_ending", default_ending_text()))
-    if "rates_include_tax" not in st.session_state:
-        st.session_state.rates_include_tax = bool(prefs.get("rates_include_tax", False))
+    Streamlit Python cannot directly read browser localStorage. This small JS
+    bridge reads localStorage, writes temporary query params, and reloads once.
+    Python then consumes the query params into st.session_state.
+    """
+    namespace = get_browser_storage_namespace()
+
+    components.html(
+        f"""
+        <script>
+        const namespace = {json.dumps(namespace)};
+        const openingKey = namespace + "_email_opening";
+        const endingKey = namespace + "_email_ending";
+        const taxKey = namespace + "_rates_include_tax";
+
+        const parentWindow = window.parent;
+        const params = new URLSearchParams(parentWindow.location.search);
+
+        if (!params.has("browser_template_loaded")) {{
+            const opening = parentWindow.localStorage.getItem(openingKey) || "";
+            const ending = parentWindow.localStorage.getItem(endingKey) || "";
+            const tax = parentWindow.localStorage.getItem(taxKey) || "";
+
+            params.set("browser_template_loaded", "1");
+            params.set("browser_email_opening", opening);
+            params.set("browser_email_ending", ending);
+            params.set("browser_rates_include_tax", tax);
+
+            const newUrl = parentWindow.location.pathname + "?" + params.toString();
+            parentWindow.history.replaceState(null, "", newUrl);
+            parentWindow.location.reload();
+        }}
+        </script>
+        """,
+        height=0,
+    )
 
 
-def save_user_preferences() -> None:
-    user_key = get_current_user_key()
-    cache = get_preference_cache()
-    cache[user_key] = {
-        "email_opening": st.session_state.get("email_opening", ""),
-        "email_ending": st.session_state.get("email_ending", default_ending_text()),
-        "rates_include_tax": bool(st.session_state.get("rates_include_tax", False)),
-    }
+def consume_browser_template_from_query_params() -> None:
+    """Move browser-loaded template values from query params into session_state."""
+    params = st.query_params
+
+    if "browser_template_consumed" in st.session_state:
+        return
+
+    # Wait until the JavaScript loader has copied browser localStorage into
+    # query params. This prevents Streamlit from rendering text_area widgets
+    # with default values before browser values arrive.
+    if params.get("browser_template_loaded", "") != "1":
+        st.stop()
+
+    browser_opening = params.get("browser_email_opening", "")
+    browser_ending = params.get("browser_email_ending", "")
+    browser_tax = params.get("browser_rates_include_tax", "")
+
+    st.session_state.email_opening = browser_opening or ""
+    st.session_state.email_ending = browser_ending or default_ending_text()
+    st.session_state.rates_include_tax = str(browser_tax).lower() == "true"
+    st.session_state.browser_template_consumed = True
 
 
-load_user_preferences_once()
+def render_local_storage_saver(opening: str, ending: str, rates_include_tax: bool) -> None:
+    """Save the current template into this browser's localStorage only."""
+    namespace = get_browser_storage_namespace()
+
+    components.html(
+        f"""
+        <script>
+        const namespace = {json.dumps(namespace)};
+        const parentWindow = window.parent;
+        parentWindow.localStorage.setItem(namespace + "_email_opening", {json.dumps(opening or "")});
+        parentWindow.localStorage.setItem(namespace + "_email_ending", {json.dumps(ending or "")});
+        parentWindow.localStorage.setItem(namespace + "_rates_include_tax", {json.dumps(str(bool(rates_include_tax)).lower())});
+        </script>
+        <div style="
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid #d8ead8;
+            background: #f3fbf3;
+            color: #1d5f1d;
+            font-weight: 700;
+            font-family: sans-serif;
+        ">
+            Template saved to this browser.
+        </div>
+        """,
+        height=52,
+    )
+
+
+
+
+render_local_storage_loader()
+consume_browser_template_from_query_params()
 
 
 # ============================================================
@@ -949,7 +1021,6 @@ with st.sidebar:
     st.caption(f"App version: {APP_VERSION}")
 
     if st.button("LOGOUT"):
-        save_user_preferences()
         st.session_state.authenticated = False
         st.session_state.pop("authenticated_user_name", None)
         st.rerun()
@@ -996,7 +1067,6 @@ if checkout <= checkin:
     st.error("Check-out date must be later than Check-in date.")
     st.stop()
 
-save_user_preferences()
 
 target_url = build_booking_url(
     hotel_code=hotel_code,
@@ -1124,7 +1194,7 @@ with email_left:
         "Opening",
         key="email_opening",
         height=150,
-        placeholder="Type the email opening here. It will be saved for your next login while the app cache is alive.",
+        placeholder="Type the email opening here. Click Save Template to save it only in this browser.",
         label_visibility="collapsed",
     )
 
@@ -1137,7 +1207,17 @@ with email_right:
         label_visibility="collapsed",
     )
 
-save_user_preferences()
+
+save_template_col, save_template_spacer = st.columns([1, 5])
+with save_template_col:
+    save_template_clicked = st.button("Save Template", type="secondary", use_container_width=True)
+
+if save_template_clicked:
+    render_local_storage_saver(
+        opening=st.session_state.email_opening,
+        ending=st.session_state.email_ending,
+        rates_include_tax=bool(st.session_state.rates_include_tax),
+    )
 
 st.subheader("Generated Email")
 email_button_col, email_button_spacer = st.columns([1, 5])
@@ -1154,7 +1234,6 @@ if email_clicked or st.session_state.generated_email:
         selected_room_lines_by_category=selected_lines_by_category,
         rates_include_tax=bool(st.session_state.rates_include_tax),
     )
-    save_user_preferences()
 
 st.text_area(
     "Email Output",
