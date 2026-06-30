@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-29 Starwood Hotel Rateshop browser-local-template-cache"
+APP_VERSION = "2026-06-30 Starwood Hotel Rateshop robust-page-load-wait"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -701,6 +701,134 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
     return raw_rooms
 
 
+# ============================================================
+# Page-load wait helpers
+# The booking page is rendered by client-side JavaScript. document.readyState can
+# become "complete" before room cards and prices are actually injected into the
+# DOM, especially on long stay-date searches. These helpers wait for the useful
+# content to appear and remain stable before parsing.
+# ============================================================
+def get_page_load_snapshot(driver: webdriver.Chrome) -> Dict[str, object]:
+    script = r"""
+    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/g;
+    const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony)/i;
+    const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
+    const roomTitleCount = titleNodes.filter(node => {
+      const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+      return text.length >= 4 && text.length <= 90 && roomRegex.test(text);
+    }).length;
+    const priceMatches = bodyText.match(priceRegex) || [];
+    const obviousLoadingText = /(loading|checking availability|fetching|searching|please wait)/i.test(bodyText);
+
+    return {
+      readyState: document.readyState,
+      bodyLength: bodyText.length,
+      roomTitleCount: roomTitleCount,
+      priceCount: priceMatches.length,
+      carouselItemCount: document.querySelectorAll('[data-scope="carousel"][data-part="item"]').length,
+      cardCount: document.querySelectorAll('.chakra-card__root, article, section').length,
+      loadingTextVisible: obviousLoadingText,
+      url: window.location.href,
+    };
+    """
+    try:
+        snapshot = driver.execute_script(script)
+    except Exception as exc:
+        return {
+            "readyState": "unknown",
+            "bodyLength": 0,
+            "roomTitleCount": 0,
+            "priceCount": 0,
+            "carouselItemCount": 0,
+            "cardCount": 0,
+            "loadingTextVisible": True,
+            "url": "",
+            "error": str(exc),
+        }
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
+def scroll_page_to_trigger_lazy_loading(driver: webdriver.Chrome) -> None:
+    """Scroll the page in steps so lazy-loaded room cards and rates render."""
+    try:
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
+        page_height = int(driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 0);") or 0)
+        if page_height <= 0:
+            return
+        step = max(500, min(900, page_height // 5 or 700))
+        for y in range(0, page_height + step, step):
+            driver.execute_script("window.scrollTo(0, arguments[0]);", y)
+            time.sleep(0.35)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
+    except Exception:
+        return
+
+
+def wait_for_booking_page_ready(
+    driver: webdriver.Chrome,
+    wait_seconds: int,
+    required_stable_cycles: int = 3,
+    poll_seconds: float = 1.5,
+) -> Dict[str, object]:
+    """
+    Wait until the page has useful rate content and the DOM stops changing.
+
+    This is stricter than Selenium's basic body wait:
+    1) wait for document.readyState to be interactive/complete;
+    2) scroll to trigger lazy-loaded room cards;
+    3) wait until room-title/price/card counts remain stable for multiple polls;
+    4) require at least one room-like title and at least one price before declaring success.
+    """
+    deadline = time.time() + max(int(wait_seconds), 30)
+    wait = WebDriverWait(driver, min(max(int(wait_seconds), 30), 180))
+    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+    try:
+        wait.until(lambda d: d.execute_script("return document.readyState") in ("interactive", "complete"))
+    except TimeoutException:
+        pass
+
+    scroll_page_to_trigger_lazy_loading(driver)
+
+    last_signature = None
+    stable_cycles = 0
+    best_snapshot: Dict[str, object] = {}
+
+    while time.time() < deadline:
+        snapshot = get_page_load_snapshot(driver)
+        best_snapshot = snapshot
+        room_title_count = int(snapshot.get("roomTitleCount", 0) or 0)
+        price_count = int(snapshot.get("priceCount", 0) or 0)
+        carousel_item_count = int(snapshot.get("carouselItemCount", 0) or 0)
+        card_count = int(snapshot.get("cardCount", 0) or 0)
+        body_length = int(snapshot.get("bodyLength", 0) or 0)
+        ready_state = str(snapshot.get("readyState", ""))
+        loading_text_visible = bool(snapshot.get("loadingTextVisible", False))
+
+        signature = (room_title_count, price_count, carousel_item_count, card_count, body_length // 250)
+        has_useful_content = room_title_count > 0 and price_count > 0
+        ready_enough = ready_state in ("interactive", "complete")
+
+        if signature == last_signature:
+            stable_cycles += 1
+        else:
+            stable_cycles = 0
+            last_signature = signature
+
+        if has_useful_content and ready_enough and not loading_text_visible and stable_cycles >= required_stable_cycles:
+            return snapshot
+
+        if room_title_count > 0 and price_count == 0:
+            scroll_page_to_trigger_lazy_loading(driver)
+
+        time.sleep(poll_seconds)
+
+    return best_snapshot
+
+
 def scrape_1hotels_once(
     url: str,
     wait_seconds: int = 35,
@@ -712,34 +840,43 @@ def scrape_1hotels_once(
         driver = init_driver(fallback_mode=fallback_mode)
         driver.get(url)
 
-        wait = WebDriverWait(driver, wait_seconds)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        load_snapshot = wait_for_booking_page_ready(
+            driver=driver,
+            wait_seconds=wait_seconds,
+            required_stable_cycles=3 if not fallback_mode else 4,
+            poll_seconds=1.5,
+        )
 
-        try:
-            wait.until(
-                lambda d: d.execute_script(
-                    "return document.body && "
-                    "(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\\s*[0-9]/.test(document.body.innerText || '') || "
-                    "document.querySelectorAll('h2,h3,h4').length > 0);"
-                )
-            )
-        except TimeoutException:
-            pass
-
-        time.sleep(settle_seconds)
+        # A short final settle remains useful because the price module sometimes
+        # injects text after the card containers become stable.
+        time.sleep(max(float(settle_seconds), 2.0))
+        scroll_page_to_trigger_lazy_loading(driver)
 
         raw_rooms = parse_rooms_with_browser_dom(driver)
         html_source = driver.page_source
         rooms = dedupe_rooms(raw_rooms)
 
         if not rooms:
+            # Give the page one extra chance after another scroll/settle cycle.
+            # This fixes the common case where the first parse happens right
+            # before prices are attached to the room cards.
+            time.sleep(3 if not fallback_mode else 6)
+            scroll_page_to_trigger_lazy_loading(driver)
+            raw_rooms = parse_rooms_with_browser_dom(driver)
+            html_source = driver.page_source
+            rooms = dedupe_rooms(raw_rooms)
+
+        if not rooms:
             rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
 
+        final_snapshot = get_page_load_snapshot(driver)
         page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True)
         return {
             "ok": True,
             "rooms": rooms,
             "raw_count": len(raw_rooms),
+            "page_load_snapshot": load_snapshot,
+            "final_page_snapshot": final_snapshot,
             "page_text_preview": page_text[:3500],
             "html_preview": html_source[:3500],
             "attempt_mode": "fallback" if fallback_mode else "primary",
