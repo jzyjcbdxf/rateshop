@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-30 Starwood Hotel Rateshop shorter-timeout-fast-parser"
+APP_VERSION = "2026-06-30 Starwood Hotel Rateshop 10s-page-open-price-poll"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -444,6 +444,10 @@ def validate_chrome_runtime() -> Dict[str, object]:
 def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> Options:
     chrome_options = Options()
     chrome_options.binary_location = chromium_binary
+    # Do not wait for every image/tracking request. The booking page body loads fast,
+    # while live prices arrive shortly after via JavaScript. Eager keeps driver.get()
+    # from blocking unnecessarily.
+    chrome_options.page_load_strategy = "eager"
 
     # Use a fresh Chrome profile on every attempt. This avoids profile-lock issues on
     # Streamlit Cloud when a previous browser process exits slowly or crashes.
@@ -484,12 +488,6 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     )
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
-
-    # Do not wait for every late-loading image/tracking request. The booking
-    # page renders rates with client-side JS, so we control useful-content waits
-    # ourselves below. This prevents driver.get(url) from sitting inside the
-    # browser page-load timeout while Streamlit shows only the spinner.
-    chrome_options.page_load_strategy = "eager"
     return chrome_options
 
 
@@ -503,7 +501,9 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
     service = Service(executable_path=chromedriver_binary)
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(80 if fallback_mode else 60)
+    # The user observed that the page shell normally loads in about 7 seconds.
+    # Keep this short, then poll the DOM for prices instead of waiting for full page load.
+    driver.set_page_load_timeout(12 if fallback_mode else 10)
     return driver
 
 
@@ -707,272 +707,136 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
     return raw_rooms
 
 
-# ============================================================
-# Progressive page-load / parsing helpers
-# The booking page is client-side rendered and can keep late network requests
-# open. Waiting for a perfect "fully loaded" state is unreliable, so this code
-# repeatedly parses while scrolling and returns as soon as usable room rates are
-# available. Every loop has a hard time budget.
-# ============================================================
-def get_page_load_snapshot(driver: webdriver.Chrome) -> Dict[str, object]:
-    script = r"""
-    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
-    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/g;
-    const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony)/i;
-    const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
-    const roomTitleCount = titleNodes.filter(node => {
-      const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-      return text.length >= 4 && text.length <= 90 && roomRegex.test(text);
-    }).length;
-    const priceMatches = bodyText.match(priceRegex) || [];
-    const loadingTextVisible = /(loading|checking availability|fetching|searching|please wait)/i.test(bodyText);
-    return {
-      readyState: document.readyState,
-      bodyLength: bodyText.length,
-      roomTitleCount: roomTitleCount,
-      priceCount: priceMatches.length,
-      carouselItemCount: document.querySelectorAll('[data-scope="carousel"][data-part="item"]').length,
-      cardCount: document.querySelectorAll('.chakra-card__root, article, section').length,
-      loadingTextVisible: loadingTextVisible,
-      scrollHeight: Math.max(document.body ? document.body.scrollHeight : 0, document.documentElement ? document.documentElement.scrollHeight : 0, 0),
-      url: window.location.href,
-    };
-    """
+def scroll_booking_page_once(driver: webdriver.Chrome, step_index: int) -> None:
+    """Small scrolls trigger lazy-loaded room cards and price nodes without wasting time."""
     try:
-        snapshot = driver.execute_script(script)
-    except Exception as exc:
-        return {
-            "readyState": "unknown",
-            "bodyLength": 0,
-            "roomTitleCount": 0,
-            "priceCount": 0,
-            "carouselItemCount": 0,
-            "cardCount": 0,
-            "loadingTextVisible": True,
-            "scrollHeight": 0,
-            "url": "",
-            "error": str(exc),
-        }
-    return snapshot if isinstance(snapshot, dict) else {}
-
-
-def safe_stop_page_load(driver: webdriver.Chrome) -> None:
-    """Stop hanging subresources without killing the DOM we already have."""
-    try:
-        driver.execute_script("window.stop();")
+        driver.execute_script(
+            """
+            const height = Math.max(
+              document.body ? document.body.scrollHeight : 0,
+              document.documentElement ? document.documentElement.scrollHeight : 0
+            );
+            const positions = [0, 0.28, 0.55, 0.82, 1.0, 0.35];
+            const ratio = positions[step_index % positions.length];
+            window.scrollTo(0, Math.floor(height * ratio));
+            """
+        )
     except Exception:
-        return
+        pass
 
 
-def wait_for_body_quickly(driver: webdriver.Chrome, seconds: int = 12) -> None:
-    """Small initial wait only. The real wait happens by progressive parsing."""
-    try:
-        WebDriverWait(driver, max(3, int(seconds))).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    except TimeoutException:
-        return
-    try:
-        WebDriverWait(driver, 8).until(lambda d: d.execute_script("return document.readyState") in ("interactive", "complete"))
-    except TimeoutException:
-        return
-
-
-def click_common_popups(driver: webdriver.Chrome) -> None:
-    """Dismiss common cookie/overlay buttons when present. Safe no-op otherwise."""
-    script = r"""
-    const labels = ['accept all', 'accept', 'agree', 'allow all', 'ok', 'close'];
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-    for (const btn of buttons) {
-      const text = ((btn.innerText || btn.textContent || btn.getAttribute('aria-label') || '') + '').trim().toLowerCase();
-      if (!text) continue;
-      if (labels.some(label => text === label || text.includes(label))) {
-        try { btn.click(); return text; } catch (e) {}
-      }
-    }
-    return '';
+def poll_rooms_after_page_open(driver: webdriver.Chrome, max_seconds: float = 6.0) -> Dict[str, object]:
     """
-    try:
-        driver.execute_script(script)
-    except Exception:
-        return
+    Poll the already-open booking page for live prices.
 
-
-def scroll_page_to_trigger_lazy_loading(driver: webdriver.Chrome, pass_index: int = 0) -> None:
-    """Scroll in short passes so lazy-loaded cards/rates render."""
-    try:
-        page_height = int(driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 0);") or 0)
-        if page_height <= 0:
-            return
-        if pass_index % 3 == 0:
-            positions = [0, int(page_height * 0.30), int(page_height * 0.60), page_height]
-        elif pass_index % 3 == 1:
-            positions = [page_height, int(page_height * 0.75), int(page_height * 0.45), int(page_height * 0.15), 0]
-        else:
-            step = max(450, min(850, page_height // 6 or 650))
-            positions = list(range(0, page_height + step, step))
-        for y in positions:
-            driver.execute_script("window.scrollTo(0, arguments[0]);", y)
-            time.sleep(0.25)
-    except Exception:
-        return
-
-
-def parse_available_rooms(driver: webdriver.Chrome) -> Dict[str, object]:
-    """Parse using live DOM first, then page_source fallback."""
-    raw_rooms = parse_rooms_with_browser_dom(driver)
-    rooms = dedupe_rooms(raw_rooms)
-    html_source = ""
-
-    if not rooms:
-        try:
-            html_source = driver.page_source
-            bs4_raw_rooms = parse_rooms_with_bs4(html_source)
-            rooms = dedupe_rooms(bs4_raw_rooms)
-            if bs4_raw_rooms and not raw_rooms:
-                raw_rooms = bs4_raw_rooms
-        except Exception:
-            html_source = ""
-
-    return {
-        "rooms": rooms,
-        "raw_rooms": raw_rooms,
-        "html_source": html_source,
-    }
-
-
-def progressive_rate_parse(
-    driver: webdriver.Chrome,
-    max_seconds: int,
-    min_extra_settle_after_first_result: float = 1.8,
-) -> Dict[str, object]:
+    The page shell can load first, then prices usually appear about 2 seconds later.
+    This loop parses repeatedly and returns as soon as room prices are present and
+    stable for a couple of quick cycles.
     """
-    Keep parsing while the page renders. Return quickly once rates are usable.
-
-    Instead of waiting until the whole website is "fully loaded", this loop:
-    - checks the DOM for room/price pairs immediately;
-    - scrolls to trigger lazy loading;
-    - if rooms appear, waits only a tiny extra settle window to catch more cards;
-    - exits hard at max_seconds.
-    """
-    deadline = time.time() + max(15, int(max_seconds))
-    best_rooms: List[Dict] = []
+    start_time = time.monotonic()
     best_raw_rooms: List[Dict] = []
-    best_html_source = ""
-    snapshots: List[Dict[str, object]] = []
-    first_result_time: Optional[float] = None
-    pass_index = 0
+    best_rooms: List[Dict] = []
+    stable_cycles = 0
+    last_count = 0
+    cycles = 0
 
-    while time.time() < deadline:
-        click_common_popups(driver)
-        scroll_page_to_trigger_lazy_loading(driver, pass_index=pass_index)
-        snapshot = get_page_load_snapshot(driver)
-        snapshots.append(snapshot)
+    while time.monotonic() - start_time <= max_seconds:
+        scroll_booking_page_once(driver, cycles)
+        time.sleep(0.45)
 
-        parsed = parse_available_rooms(driver)
-        rooms = parsed.get("rooms", []) if isinstance(parsed, dict) else []
-        raw_rooms = parsed.get("raw_rooms", []) if isinstance(parsed, dict) else []
-        html_source = str(parsed.get("html_source", "") if isinstance(parsed, dict) else "")
+        raw_rooms = parse_rooms_with_browser_dom(driver)
+        rooms = dedupe_rooms(raw_rooms)
+        cycles += 1
 
         if len(rooms) > len(best_rooms):
-            best_rooms = rooms
             best_raw_rooms = raw_rooms
-            best_html_source = html_source
-            if first_result_time is None:
-                first_result_time = time.time()
+            best_rooms = rooms
+            stable_cycles = 0
+            last_count = len(rooms)
+        elif rooms and len(rooms) == last_count:
+            stable_cycles += 1
+        else:
+            last_count = len(rooms)
 
-        if best_rooms and first_result_time is not None:
-            # Once prices are available, do not wait for the whole site. Give it
-            # a very short extra window to add additional room cards, then return.
-            if time.time() - first_result_time >= min_extra_settle_after_first_result:
-                break
+        # Prices often show up shortly after the shell. Once the count is stable,
+        # stop immediately instead of waiting for the full timeout.
+        if best_rooms and stable_cycles >= 2:
+            break
 
-        # If the page says it is still loading but has no usable content yet,
-        # stop subresource loading after a few passes so the DOM can be queried.
-        if pass_index == 2 and not best_rooms:
-            safe_stop_page_load(driver)
-
-        pass_index += 1
-        time.sleep(0.7)
-
-    if not best_html_source:
-        try:
-            best_html_source = driver.page_source
-        except Exception:
-            best_html_source = ""
+    try:
+        driver.execute_script("window.scrollTo(0, 0);")
+    except Exception:
+        pass
 
     return {
-        "rooms": best_rooms,
         "raw_rooms": best_raw_rooms,
-        "html_source": best_html_source,
-        "snapshots": snapshots[-10:],
-        "final_snapshot": get_page_load_snapshot(driver),
+        "rooms": best_rooms,
+        "cycles": cycles,
+        "elapsed_seconds": round(time.monotonic() - start_time, 2),
     }
 
 
 def scrape_1hotels_once(
     url: str,
-    wait_seconds: int = 35,
-    settle_seconds: int = 6,
+    wait_seconds: int = 10,
+    settle_seconds: int = 0,
     fallback_mode: bool = False,
 ) -> Dict:
     driver = None
+    started_at = time.monotonic()
+    get_timed_out = False
+    body_seen = False
+
     try:
         driver = init_driver(fallback_mode=fallback_mode)
 
-        # Keep page navigation bounded. With page_load_strategy="eager", this
-        # usually returns after DOMContentLoaded. If late resources hang, we stop
-        # them and still parse the DOM already rendered.
-        navigation_timeout = 45 if fallback_mode else 32
-        driver.set_page_load_timeout(navigation_timeout)
         try:
             driver.get(url)
         except TimeoutException:
-            safe_stop_page_load(driver)
+            # With a 10s page-load timeout, the useful DOM may already exist. Continue
+            # and poll for prices instead of treating this as a hard failure.
+            get_timed_out = True
 
-        wait_for_body_quickly(driver, seconds=8 if not fallback_mode else 10)
+        try:
+            WebDriverWait(driver, max(3, min(int(wait_seconds), 10))).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            body_seen = True
+        except TimeoutException:
+            body_seen = False
 
-        # Cap the parser budget so Streamlit never sits for minutes inside one
-        # attempt. The sidebar wait_seconds still matters, but cannot create an
-        # unbounded "fully loaded" wait.
-        parser_budget = min(max(int(wait_seconds), 18), 35 if not fallback_mode else 50)
-        parsed = progressive_rate_parse(
-            driver=driver,
-            max_seconds=parser_budget,
-            min_extra_settle_after_first_result=1.0 if not fallback_mode else 1.6,
-        )
+        # Main mode: page shell up to 10s, then about 6s of price polling.
+        # Fallback adds a tiny buffer only; it should not become slower than the old version.
+        price_poll_seconds = 8.0 if fallback_mode else 6.0
+        poll_result = poll_rooms_after_page_open(driver, max_seconds=price_poll_seconds)
+        raw_rooms = list(poll_result.get("raw_rooms", []))
+        rooms = dedupe_rooms(raw_rooms)
 
-        rooms = parsed.get("rooms", []) if isinstance(parsed, dict) else []
-        raw_rooms = parsed.get("raw_rooms", []) if isinstance(parsed, dict) else []
-        html_source = str(parsed.get("html_source", "") if isinstance(parsed, dict) else "")
-
+        html_source = driver.page_source
         if not rooms:
-            # One final lightweight parse after stopping any remaining network.
-            safe_stop_page_load(driver)
-            time.sleep(0.8 if not fallback_mode else 1.2)
-            final_parsed = parse_available_rooms(driver)
-            rooms = final_parsed.get("rooms", []) if isinstance(final_parsed, dict) else []
-            raw_rooms = final_parsed.get("raw_rooms", raw_rooms) if isinstance(final_parsed, dict) else raw_rooms
-            html_source = str(final_parsed.get("html_source", html_source) if isinstance(final_parsed, dict) else html_source)
+            # One final cheap HTML parse in case prices are in page_source but DOM script missed them.
+            rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
 
-        page_text = BeautifulSoup(html_source or "", "html.parser").get_text("\n", strip=True)
+        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True)
         return {
             "ok": True,
             "rooms": rooms,
             "raw_count": len(raw_rooms),
-            "page_load_snapshots": parsed.get("snapshots", []) if isinstance(parsed, dict) else [],
-            "final_page_snapshot": parsed.get("final_snapshot", {}) if isinstance(parsed, dict) else {},
             "page_text_preview": page_text[:3500],
-            "html_preview": (html_source or "")[:3500],
+            "html_preview": html_source[:3500],
             "attempt_mode": "fallback" if fallback_mode else "primary",
+            "get_timed_out": get_timed_out,
+            "body_seen": body_seen,
+            "poll_cycles": poll_result.get("cycles", 0),
+            "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
+            "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
     finally:
         if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            driver.quit()
 
 
-def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, retry_once: bool = True) -> Dict:
+def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, retry_once: bool = True) -> Dict:
     attempts = [False, True] if retry_once else [False]
     history: List[Dict[str, object]] = []
     last_result: Optional[Dict] = None
@@ -983,19 +847,22 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, re
         try:
             result = scrape_1hotels_once(
                 url=url,
-                wait_seconds=wait_seconds + (12 if fallback_mode else 0),
+                wait_seconds=12 if fallback_mode else wait_seconds,
                 settle_seconds=settle_seconds,
                 fallback_mode=fallback_mode,
             )
             rooms = result.get("rooms", [])
-            final_snapshot = result.get("final_page_snapshot", {})
             history.append(
                 {
                     "attempt": attempt_index,
                     "mode": mode_name,
                     "status": "ok",
                     "rooms_count": len(rooms),
-                    "final_snapshot": final_snapshot,
+                    "get_timed_out": result.get("get_timed_out", False),
+                    "body_seen": result.get("body_seen", False),
+                    "poll_cycles": result.get("poll_cycles", 0),
+                    "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
+                    "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
                 }
             )
             result["retry_history"] = history
@@ -1005,7 +872,7 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, re
                 return result
 
             if attempt_index < len(attempts):
-                time.sleep(0.5)
+                time.sleep(0.8)
                 continue
 
             return result
@@ -1020,7 +887,7 @@ def scrape_1hotels(url: str, wait_seconds: int = 35, settle_seconds: int = 6, re
                 }
             )
             if attempt_index < len(attempts):
-                time.sleep(0.5)
+                time.sleep(0.8)
                 continue
 
     if last_result is not None:
@@ -1277,7 +1144,7 @@ with st.sidebar:
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
     promo_code = st.text_input("Promo Code", value="")
-    wait_seconds = st.slider("Browser wait seconds", 20, 120, 45, 5)
+    wait_seconds = st.slider("Page open timeout seconds", 8, 20, 10, 1)
 
     with st.expander("Chrome runtime check", expanded=False):
         runtime = get_chrome_runtime()
@@ -1320,10 +1187,10 @@ if "generated_email" not in st.session_state:
 
 if search_clicked:
     room_nights_for_search = max((checkout - checkin).days, 1)
-    adaptive_wait_seconds = int(min(90, max(int(wait_seconds), 32 + room_nights_for_search * 3)))
+    adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
     with st.spinner(
-        f"Starting the headless browser and fetching live rates. The scraper now parses progressively and returns as soon as prices appear. "
-        f"Primary parser budget: {min(max(int(adaptive_wait_seconds), 18), 35)}s before fallback retry."
+        f"Opening booking page for up to {adaptive_wait_seconds}s, then polling live prices for 6s. "
+        f"Fallback adds a short second attempt only if no price is found."
     ):
         try:
             result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
