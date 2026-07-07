@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-30 Starwood Hotel Rateshop 10s-page-open-price-poll"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-stable-v2"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -444,26 +444,27 @@ def validate_chrome_runtime() -> Dict[str, object]:
 def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> Options:
     chrome_options = Options()
     chrome_options.binary_location = chromium_binary
-    # Do not wait for every image/tracking request. The booking page body loads fast,
-    # while live prices arrive shortly after via JavaScript. Eager keeps driver.get()
-    # from blocking unnecessarily.
+
+    # Streamlit Cloud is more stable when Chrome does not wait for every tracking,
+    # image, or async pricing request. We open the page quickly, then poll DOM prices.
     chrome_options.page_load_strategy = "eager"
 
-    # Use a fresh Chrome profile on every attempt. This avoids profile-lock issues on
-    # Streamlit Cloud when a previous browser process exits slowly or crashes.
+    # Fresh profile per browser attempt prevents stale lock files from killing Chrome.
+    # The directory path is also stored as a capability-adjacent custom attribute so
+    # init_driver/scrape can clean it up after driver.quit().
     user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
+    chrome_options._starwood_user_data_dir = user_data_dir  # type: ignore[attr-defined]
+
+    # IMPORTANT FIX:
+    # - Do not use a fixed remote debugging port like 9222; Streamlit reruns can collide.
+    # - Do not use --single-process; it is fragile in Debian/Streamlit containers.
+    # - Keep both primary and fallback on random debug ports.
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--remote-debugging-port=0")
 
     if fallback_mode:
-        # Fallback mode is intentionally more conservative. It avoids --single-process
-        # and uses a random remote debugging port, which helps when the first browser
-        # startup or page load is flaky in Streamlit Cloud.
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    else:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--single-process")
+        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     chrome_options.add_argument("--no-sandbox")
@@ -478,17 +479,25 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
     chrome_options.add_argument("--disable-setuid-sandbox")
+    chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/150.0.0.0 Safari/537.36"
     )
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     return chrome_options
+
+
+def cleanup_chrome_profile(chrome_options: Options) -> None:
+    """Remove the temporary Chrome profile created for one Selenium attempt."""
+    user_data_dir = getattr(chrome_options, "_starwood_user_data_dir", None)
+    if user_data_dir and isinstance(user_data_dir, str) and os.path.isdir(user_data_dir):
+        shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
@@ -500,10 +509,19 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
     service = Service(executable_path=chromedriver_binary)
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    # The user observed that the page shell normally loads in about 7 seconds.
-    # Keep this short, then poll the DOM for prices instead of waiting for full page load.
-    driver.set_page_load_timeout(12 if fallback_mode else 10)
+    try:
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    except Exception:
+        cleanup_chrome_profile(chrome_options)
+        raise
+
+    # Keep a reference so scrape_1hotels_once can clean the temp Chrome profile.
+    driver._starwood_chrome_options = chrome_options  # type: ignore[attr-defined]
+
+    # The page shell normally loads quickly; live rates arrive shortly after via JS.
+    # Keep timeout short and let poll_rooms_after_page_open collect prices.
+    driver.set_page_load_timeout(14 if fallback_mode else 10)
+    driver.set_script_timeout(12)
     return driver
 
 
@@ -833,7 +851,12 @@ def scrape_1hotels_once(
         }
     finally:
         if driver is not None:
-            driver.quit()
+            chrome_options_for_cleanup = getattr(driver, "_starwood_chrome_options", None)
+            try:
+                driver.quit()
+            finally:
+                if chrome_options_for_cleanup is not None:
+                    cleanup_chrome_profile(chrome_options_for_cleanup)
 
 
 def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, retry_once: bool = True) -> Dict:
