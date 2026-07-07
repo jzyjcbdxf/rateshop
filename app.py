@@ -25,9 +25,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 # ============================================================
 # IMPORTANT VERSION MARKER
-# If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-07 Starwood Hotel Rateshop Pure-Automated-Chrome"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop Explicit-Path-Fix"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -286,25 +285,29 @@ def build_booking_url(
 
 
 def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
-    # ============================================================
-    # 核心修复方案：利用最新 Selenium 4 的 ChromeManager 机制。
-    # 我们不再在系统中硬编码寻找 chromium 路径，而是启用标准的无头参数，
-    # 让 Selenium 自动下载完全互相隔离且相互兼容的稳定版 Chrome for Testing 二进制。
-    # ============================================================
     chrome_options = Options()
     chrome_options.page_load_strategy = "eager"
     
-    # 启用标准无头模式，并附加对 Linux 虚拟化容器极其关键的环境稳定性选项
+    # 核心稳定性参数组
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--window-size=1920,1400")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--disable-extensions")
     
-    # 防止沙箱内部崩溃的缓存清理目录
-    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_stable_")
+    # 显式探测并指定 Streamlit Cloud 上系统自带的 Chromium 二进制文件路径
+    # 这能极大预防因为 Selenium Manager 寻找不匹配的官方 Chrome 导致的闪退问题
+    potential_paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser"]
+    chosen_path = None
+    for p in potential_paths:
+        if os.path.exists(p):
+            chosen_path = p
+            break
+    if chosen_path:
+        chrome_options.binary_location = chosen_path
+    
+    # 清理缓存，防止沙箱因为多进程冲突死锁
+    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_")
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     
     chrome_options.add_argument(
@@ -313,7 +316,14 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
         "Chrome/125.0.0.0 Safari/537.36"
     )
     
-    driver = webdriver.Chrome(options=chrome_options)
+    # 显式指定本地 packages.txt 安装的 chromedriver
+    service_path = "/usr/bin/chromedriver"
+    if os.path.exists(service_path):
+        service = Service(executable_path=service_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    else:
+        driver = webdriver.Chrome(options=chrome_options)
+        
     driver.set_page_load_timeout(15 if fallback_mode else 12)
     return driver
 
@@ -955,7 +965,7 @@ if "generated_email" not in st.session_state:
 
 if search_clicked:
     adaptive_wait_seconds = int(min(25, max(int(wait_seconds), 10)))
-    with st.spinner("Initializing clean sandboxed Chrome binaries and scanning live rates..."):
+    with st.spinner("Connecting to built-in secure Chromium browser and scanning live rates..."):
         try:
             result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
