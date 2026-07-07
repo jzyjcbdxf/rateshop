@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -27,7 +28,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-30 Starwood Hotel Rateshop 10s-page-open-price-poll"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-stable-main-v3"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -325,6 +326,9 @@ def build_booking_url(
     return f"{BASE_BOOKING_URL.format(hotel_code=hotel_code)}?{urlencode(params)}"
 
 
+BROWSER_START_LOCK = threading.Lock()
+
+
 # ============================================================
 # Chrome / Chromedriver helpers
 # This version intentionally NEVER falls back to Selenium Manager.
@@ -409,6 +413,8 @@ def get_chrome_runtime() -> Dict[str, object]:
         "ls_usr_bin_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/bin/chromium /usr/bin/chromedriver 2>&1 || true"]),
         "dpkg_chromium": shell_output(["/bin/sh", "-lc", "dpkg -l | grep -E 'chromium|chromedriver|chrome' || true"]),
         "selenium_cache": shell_output(["/bin/sh", "-lc", "ls -la /home/appuser/.cache/selenium 2>&1 || true"]),
+        "tmp_disk": shell_output(["/bin/sh", "-lc", "df -h /tmp /dev/shm 2>&1 || true"]),
+        "running_chrome": shell_output(["/bin/sh", "-lc", "ps aux | grep -Ei 'chrom[e|ium]|chromedriver' | grep -v grep || true"]),
     }
 
     return {
@@ -444,51 +450,89 @@ def validate_chrome_runtime() -> Dict[str, object]:
 def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> Options:
     chrome_options = Options()
     chrome_options.binary_location = chromium_binary
-    # Do not wait for every image/tracking request. The booking page body loads fast,
-    # while live prices arrive shortly after via JavaScript. Eager keeps driver.get()
-    # from blocking unnecessarily.
+
+    # The page shell loads quickly, while live prices arrive shortly after through JS.
+    # Eager prevents driver.get() from hanging on tracking/image requests.
     chrome_options.page_load_strategy = "eager"
 
-    # Use a fresh Chrome profile on every attempt. This avoids profile-lock issues on
-    # Streamlit Cloud when a previous browser process exits slowly or crashes.
-    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
-
-    if fallback_mode:
-        # Fallback mode is intentionally more conservative. It avoids --single-process
-        # and uses a random remote debugging port, which helps when the first browser
-        # startup or page load is flaky in Streamlit Cloud.
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--remote-debugging-port=0")
-        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    else:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--single-process")
-
+    # Fresh profile per browser attempt. This is important on Streamlit/Cloud Run because
+    # a prior Chrome process can leave a locked or corrupt profile behind.
+    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_", dir="/tmp")
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    chrome_options.add_argument("--profile-directory=Default")
+
+    # Required/stability flags for Linux container environments.
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--window-size=1920,1400")
+    chrome_options.add_argument("--lang=en-US,en")
+
+    # IMPORTANT:
+    # Do NOT use --single-process in modern Chromium 150 cloud containers.
+    # Do NOT use a fixed --remote-debugging-port like 9222 because concurrent Streamlit
+    # sessions can collide. Primary uses pipe; fallback uses a random port.
+    if fallback_mode:
+        chrome_options.add_argument("--remote-debugging-port=0")
+        chrome_options.add_argument("--disable-features=VizDisplayCompositor,Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints")
+    else:
+        chrome_options.add_argument("--remote-debugging-pipe")
+        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints")
+
+    # Reduce background services and noisy browser features.
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-breakpad")
+    chrome_options.add_argument("--disable-client-side-phishing-detection")
+    chrome_options.add_argument("--disable-component-extensions-with-background-pages")
     chrome_options.add_argument("--disable-default-apps")
+    chrome_options.add_argument("--disable-hang-monitor")
+    chrome_options.add_argument("--disable-ipc-flooding-protection")
+    chrome_options.add_argument("--disable-notifications")
+    chrome_options.add_argument("--disable-popup-blocking")
+    chrome_options.add_argument("--disable-prompt-on-repost")
     chrome_options.add_argument("--disable-sync")
     chrome_options.add_argument("--metrics-recording-only")
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--window-size=1920,1400")
+    chrome_options.add_argument("--no-default-browser-check")
+    chrome_options.add_argument("--password-store=basic")
+    chrome_options.add_argument("--use-mock-keychain")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--lang=en-US,en")
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/150.0.0.0 Safari/537.36"
     )
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option(
+        "prefs",
+        {
+            "profile.default_content_setting_values.notifications": 2,
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        },
+    )
+
+    # Keep this on options so init_driver can clean it up after driver.quit().
+    chrome_options._starwood_user_data_dir = user_data_dir  # type: ignore[attr-defined]
     return chrome_options
+
+def read_file_tail(path: str, max_chars: int = 6000) -> str:
+    try:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                return handle.read()[-max_chars:]
+    except Exception as exc:
+        return f"Unable to read {path}: {exc}"
+    return ""
 
 
 def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
@@ -498,13 +542,55 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
 
     # CRITICAL: always pass Service(executable_path=...).
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
-    service = Service(executable_path=chromedriver_binary)
+    chromedriver_log = f"/tmp/starwood_chromedriver_{'fallback' if fallback_mode else 'primary'}_{int(time.time() * 1000)}.log"
+    service = Service(
+        executable_path=chromedriver_binary,
+        log_output=chromedriver_log,
+        service_args=["--verbose"],
+    )
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    # The user observed that the page shell normally loads in about 7 seconds.
-    # Keep this short, then poll the DOM for prices instead of waiting for full page load.
-    driver.set_page_load_timeout(12 if fallback_mode else 10)
-    return driver
+    user_data_dir = getattr(chrome_options, "_starwood_user_data_dir", "")
+
+    try:
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        # The user observed that the page shell normally loads in about 7 seconds.
+        # Keep this short, then poll the DOM for prices instead of waiting for full page load.
+        driver.set_page_load_timeout(14 if fallback_mode else 11)
+        driver.set_script_timeout(30)
+        driver._starwood_user_data_dir = user_data_dir  # type: ignore[attr-defined]
+        driver._starwood_chromedriver_log = chromedriver_log  # type: ignore[attr-defined]
+        return driver
+    except Exception as exc:
+        log_tail = read_file_tail(chromedriver_log)
+        try:
+            if user_data_dir:
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "ChromeDriver session creation failed. "
+            f"fallback_mode={fallback_mode}; "
+            f"chromium_binary={chromium_binary}; "
+            f"chromedriver_binary={chromedriver_binary}; "
+            f"chromedriver_log={chromedriver_log}; "
+            f"chromedriver_log_tail={log_tail}; "
+            f"original_error={exc}"
+        ) from exc
+
+
+def cleanup_driver(driver: Optional[webdriver.Chrome]) -> None:
+    if driver is None:
+        return
+    user_data_dir = getattr(driver, "_starwood_user_data_dir", "")
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    try:
+        if user_data_dir:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -832,8 +918,7 @@ def scrape_1hotels_once(
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
     finally:
-        if driver is not None:
-            driver.quit()
+        cleanup_driver(driver)
 
 
 def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, retry_once: bool = True) -> Dict:
@@ -845,12 +930,15 @@ def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, re
     for attempt_index, fallback_mode in enumerate(attempts, start=1):
         mode_name = "fallback" if fallback_mode else "primary"
         try:
-            result = scrape_1hotels_once(
-                url=url,
-                wait_seconds=12 if fallback_mode else wait_seconds,
-                settle_seconds=settle_seconds,
-                fallback_mode=fallback_mode,
-            )
+            # Selenium/Chromium is memory-heavy and profile-sensitive in cloud containers.
+            # Lock startup/search per process to avoid concurrent Chrome crashes.
+            with BROWSER_START_LOCK:
+                result = scrape_1hotels_once(
+                    url=url,
+                    wait_seconds=12 if fallback_mode else wait_seconds,
+                    settle_seconds=settle_seconds,
+                    fallback_mode=fallback_mode,
+                )
             rooms = result.get("rooms", [])
             history.append(
                 {
@@ -1238,8 +1326,8 @@ if search_clicked:
             with st.expander("Debug: Chrome runtime diagnostics", expanded=True):
                 st.json(get_chrome_runtime())
             st.warning(
-                "Important: if the error still shows /home/appuser/.cache/selenium/chromedriver, "
-                "Streamlit is still running an older app.py, or the app was not rebooted successfully."
+                "Important: if Python still shows 3.14 or APP_VERSION is not cloud-chrome-stable-main-v3, "
+                "the deployment is still running old files or the Python version file was not applied."
             )
 
 st.subheader("Room Type Selection")
