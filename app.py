@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-pipe-v3"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-fast-nav-v4"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -455,7 +455,7 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
 
     # Streamlit Cloud is more stable when Chrome does not wait for every tracking,
     # image, or async pricing request. We open the page quickly, then poll DOM prices.
-    chrome_options.page_load_strategy = "eager"
+    chrome_options.page_load_strategy = "none"
 
     # Fresh profile per browser attempt prevents stale lock files from killing Chrome.
     # The directory path is also stored as a capability-adjacent custom attribute so
@@ -504,9 +504,10 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     chrome_options.add_argument("--lang=en-US,en")
 
     if fallback_mode:
-        # Fallback is intentionally *less* customized, not more. It only changes
-        # page-load behavior below; Chrome launch flags stay the same.
-        chrome_options.page_load_strategy = "normal"
+        # Fallback keeps the same non-blocking navigation strategy.
+        # Do not switch to normal page load here, because Streamlit Cloud can hang
+        # while waiting for third-party booking-page requests to finish.
+        chrome_options.page_load_strategy = "none"
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -859,16 +860,17 @@ def scrape_1hotels_once(
             get_timed_out = True
 
         try:
-            WebDriverWait(driver, max(3, min(int(wait_seconds), 10))).until(
+            WebDriverWait(driver, 4 if fallback_mode else 2).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             body_seen = True
         except TimeoutException:
             body_seen = False
 
-        # Main mode: page shell up to 10s, then about 6s of price polling.
-        # Fallback adds a tiny buffer only; it should not become slower than the old version.
-        price_poll_seconds = 8.0 if fallback_mode else 6.0
+        # Non-blocking navigation: do not wait for every third-party request.
+        # Poll the DOM directly for async room prices. This prevents the app from
+        # sitting on the spinner while the booking engine keeps network requests open.
+        price_poll_seconds = 7.0 if fallback_mode else 6.0
         poll_result = poll_rooms_after_page_open(driver, max_seconds=price_poll_seconds)
         raw_rooms = list(poll_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
@@ -1255,11 +1257,11 @@ if search_clicked:
     room_nights_for_search = max((checkout - checkin).days, 1)
     adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
     with st.spinner(
-        f"Opening booking page for up to {adaptive_wait_seconds}s, then polling live prices for 6s. "
-        f"Fallback adds a short second attempt only if no price is found."
+        f"Opening booking page quickly, then polling live prices for 6s. "
+        f"Automatic fallback is disabled to avoid long Streamlit Cloud hangs."
     ):
         try:
-            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
+            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=False)
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
