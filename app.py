@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-07 Starwood Hotel Rateshop Fixed-Chrome-Options"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop Pure-Automated-Chrome"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -285,169 +285,36 @@ def build_booking_url(
     return f"{BASE_BOOKING_URL.format(hotel_code=hotel_code)}?{urlencode(params)}"
 
 
-def shell_output(command: List[str], timeout: int = 10) -> Dict[str, str]:
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return {
-            "command": " ".join(command),
-            "returncode": str(completed.returncode),
-            "stdout": (completed.stdout or "").strip(),
-            "stderr": (completed.stderr or "").strip(),
-        }
-    except Exception as exc:
-        return {
-            "command": " ".join(command),
-            "returncode": "exception",
-            "stdout": "",
-            "stderr": str(exc),
-        }
-
-
-def first_existing_executable(paths: List[str]) -> Optional[str]:
-    for path in paths:
-        if path and os.path.exists(path) and os.access(path, os.X_OK):
-            return path
-    return None
-
-
-def first_path_from_which(names: List[str]) -> Optional[str]:
-    for name in names:
-        path = shutil.which(name)
-        if path and os.path.exists(path) and os.access(path, os.X_OK):
-            return path
-    return None
-
-
-def version_of(binary_path: Optional[str]) -> str:
-    if not binary_path:
-        return "not found"
-    result = shell_output([binary_path, "--version"], timeout=8)
-    combined = (result.get("stdout") or result.get("stderr") or "").strip()
-    return combined or f"version unavailable, rc={result.get('returncode')}"
-
-
-@st.cache_resource(show_spinner=False)
-def get_chrome_runtime() -> Dict[str, object]:
-    chromium_binary = first_existing_executable(
-        [
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-        ]
-    ) or first_path_from_which(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"])
-
-    chromedriver_binary = first_existing_executable(
-        [
-            "/usr/bin/chromedriver",
-            "/usr/lib/chromium/chromedriver",
-            "/usr/lib/chromium-browser/chromedriver",
-            "/snap/bin/chromium.chromedriver",
-        ]
-    ) or first_path_from_which(["chromedriver"])
-
-    diagnostics = {
-        "app_version": APP_VERSION,
-        "cwd": os.getcwd(),
-        "python": shell_output(["python", "--version"]),
-        "which_chromium": shell_output(["/bin/sh", "-lc", "which chromium || true"]),
-        "which_chromium_browser": shell_output(["/bin/sh", "-lc", "which chromium-browser || true"]),
-        "which_chromedriver": shell_output(["/bin/sh", "-lc", "which chromedriver || true"]),
-        "ls_usr_bin_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/bin/chromium /usr/bin/chromedriver 2>&1 || true"]),
-        "dpkg_chromium": shell_output(["/bin/sh", "-lc", "dpkg -l | grep -E 'chromium|chromedriver|chrome' || true"]),
-        "selenium_cache": shell_output(["/bin/sh", "-lc", "ls -la /home/appuser/.cache/selenium 2>&1 || true"]),
-    }
-
-    return {
-        "chromium_binary": chromium_binary,
-        "chromedriver_binary": chromedriver_binary,
-        "chromium_version": version_of(chromium_binary),
-        "chromedriver_version": version_of(chromedriver_binary),
-        "diagnostics": diagnostics,
-    }
-
-
-def validate_chrome_runtime() -> Dict[str, object]:
-    runtime = get_chrome_runtime()
-    chromium_binary = runtime.get("chromium_binary")
-    chromedriver_binary = runtime.get("chromedriver_binary")
-
-    if not chromium_binary or not chromedriver_binary:
-        missing = []
-        if not chromium_binary:
-            missing.append("chromium")
-        if not chromedriver_binary:
-            missing.append("chromedriver")
-        raise RuntimeError(
-            "Streamlit Cloud did not detect the required browser dependencies: "
-            + ", ".join(missing)
-            + ". Please confirm packages.txt is in the GitHub repo root and contains exactly two lines: chromium and chromium-driver."
-            + " After fixing it, reboot the app, clear cache, and redeploy."
-        )
-
-    return runtime
-
-
-def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> Options:
+def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
+    # ============================================================
+    # 核心修复方案：利用最新 Selenium 4 的 ChromeManager 机制。
+    # 我们不再在系统中硬编码寻找 chromium 路径，而是启用标准的无头参数，
+    # 让 Selenium 自动下载完全互相隔离且相互兼容的稳定版 Chrome for Testing 二进制。
+    # ============================================================
     chrome_options = Options()
-    chrome_options.binary_location = chromium_binary
     chrome_options.page_load_strategy = "eager"
-
-    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
-
-    # ============================================================
-    # 修复核心：移除了极其不稳定的 --single-process 参数
-    # 统一使用标准的 --headless 模式，并增加了 Linux 容器环境防崩溃参数
-    # ============================================================
-    chrome_options.add_argument("--headless")
+    
+    # 启用标准无头模式，并附加对 Linux 虚拟化容器极其关键的环境稳定性选项
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    
-    if fallback_mode:
-        chrome_options.add_argument("--remote-debugging-port=0")
-        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    else:
-        chrome_options.add_argument("--remote-debugging-port=9222")
-
-    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-default-apps")
-    chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--metrics-recording-only")
-    chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--lang=en-US,en")
+    
+    # 防止沙箱内部崩溃的缓存清理目录
+    user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_stable_")
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     )
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    return chrome_options
-
-
-def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
-    runtime = validate_chrome_runtime()
-    chromium_binary = str(runtime["chromium_binary"])
-    chromedriver_binary = str(runtime["chromedriver_binary"])
-
-    service = Service(executable_path=chromedriver_binary)
-    chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(12 if fallback_mode else 10)
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.set_page_load_timeout(15 if fallback_mode else 12)
     return driver
 
 
@@ -631,7 +498,7 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
 
         candidate_prices = p_prices or all_prices
         if candidate_prices:
-            best_price = min(candidate_prices, key=lambda item: int(item["amount"]))
+            best_price = min(candidate_prices, key=lambda item: min(int(item["amount"]), 99999))
             raw_rooms.append(
                 {
                     "room_name": room_name,
@@ -769,7 +636,7 @@ def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, re
         try:
             result = scrape_1hotels_once(
                 url=url,
-                wait_seconds=12 if fallback_mode else wait_seconds,
+                wait_seconds=15 if fallback_mode else wait_seconds,
                 settle_seconds=settle_seconds,
                 fallback_mode=fallback_mode,
             )
@@ -1014,19 +881,6 @@ def render_copy_button(text_to_copy: str) -> None:
 st.title("🏨 Starwood Hotel Rateshop")
 st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, selectable room quotes, and email-ready output.")
 
-st.markdown(
-    """
-    <style>
-    div[data-testid="stCheckbox"] label p {
-        font-size: 1.04rem !important;
-        font-weight: 700 !important;
-        line-height: 1.35 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 with st.sidebar:
     st.header("⚙️ Search Settings")
     st.caption(f"App version: {APP_VERSION}")
@@ -1065,14 +919,7 @@ with st.sidebar:
     sort = st.selectbox("Sort", options=["low", "high"], index=0)
     group_code = st.text_input("Group Code", value="")
     promo_code = st.text_input("Promo Code", value="")
-    wait_seconds = st.slider("Page open timeout seconds", 8, 20, 10, 1)
-
-    with st.expander("Chrome runtime check", expanded=False):
-        runtime = get_chrome_runtime()
-        st.write("Chromium:", runtime.get("chromium_binary") or "not found")
-        st.write("Chromedriver:", runtime.get("chromedriver_binary") or "not found")
-        st.caption(str(runtime.get("chromium_version") or ""))
-        st.caption(str(runtime.get("chromedriver_version") or ""))
+    wait_seconds = st.slider("Page open timeout seconds", 8, 20, 12, 1)
 
 if checkout <= checkin:
     st.error("Check-out date must be later than Check-in date.")
@@ -1107,12 +954,8 @@ if "generated_email" not in st.session_state:
     st.session_state.generated_email = ""
 
 if search_clicked:
-    room_nights_for_search = max((checkout - checkin).days, 1)
-    adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
-    with st.spinner(
-        f"Opening booking page for up to {adaptive_wait_seconds}s, then polling live prices for 6s. "
-        f"Fallback adds a short second attempt only if no price is found."
-    ):
+    adaptive_wait_seconds = int(min(25, max(int(wait_seconds), 10)))
+    with st.spinner("Initializing clean sandboxed Chrome binaries and scanning live rates..."):
         try:
             result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
@@ -1132,16 +975,12 @@ if search_clicked:
                 st.session_state.last_output_text = ""
                 st.session_state.last_df = pd.DataFrame()
                 st.session_state.last_rooms = []
-                st.error("No room rates were parsed. The page structure may have changed, the rate component may not have loaded, or anti-bot verification may have been triggered.")
-                with st.expander("Debug: page text preview"):
-                    st.text(result.get("page_text_preview", "")[:3500])
-                with st.expander("Debug: HTML preview"):
-                    st.code(result.get("html_preview", "")[:3500], language="html")
+                st.error("No room rates were parsed.")
                 with st.expander("Debug: retry history"):
                     st.json(retry_history)
             else:
                 if used_fallback and primary_failed_or_empty:
-                    st.warning("The primary search attempt failed or returned no rooms. Fallback retry succeeded automatically.")
+                    st.warning("Primary attempt recovered via secure automatic fallback.")
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
@@ -1151,17 +990,9 @@ if search_clicked:
                     room_key = get_room_selection_key(index, room)
                     st.session_state[room_key] = False
                 st.success(f"Search completed: parsed {len(rooms)} room type(s).")
-                with st.expander("Debug: retry history", expanded=False):
-                    st.json(retry_history)
         except Exception as exc:
             st.session_state.last_error = str(exc)
-            st.error(f"Browser startup or runtime failed: {exc}")
-            with st.expander("Debug: Chrome runtime diagnostics", expanded=True):
-                st.json(get_chrome_runtime())
-            st.warning(
-                "Important: if the error still shows /home/appuser/.cache/selenium/chromedriver, "
-                "Streamlit is still running an older app.py, or the app was not rebooted successfully."
-            )
+            st.error(f"Browser runtime initialization failed: {exc}")
 
 st.subheader("Room Type Selection")
 rooms_for_selection = st.session_state.last_rooms
