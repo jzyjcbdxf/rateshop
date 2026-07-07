@@ -5,10 +5,8 @@ import os
 import re
 import shutil
 import subprocess
-import socket
 import tempfile
 import time
-import urllib.request
 from datetime import date, timedelta
 from typing import Dict, List, Optional
 from urllib.parse import urlencode
@@ -29,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cdp-no-chromedriver-v5"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-stable-v2"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -383,13 +381,8 @@ def version_of(binary_path: Optional[str]) -> str:
 
 @st.cache_resource(show_spinner=False)
 def get_chrome_runtime() -> Dict[str, object]:
-    # Prefer the real Chromium binary over the /usr/bin/chromium shell wrapper.
-    # On Debian/Streamlit Cloud, ChromeDriver can report "Chrome instance exited"
-    # when binary_location points to the wrapper instead of /usr/lib/chromium/chromium.
     chromium_binary = first_existing_executable(
         [
-            "/usr/lib/chromium/chromium",
-            "/usr/lib/chromium-browser/chromium-browser",
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/usr/bin/google-chrome",
@@ -410,13 +403,10 @@ def get_chrome_runtime() -> Dict[str, object]:
         "app_version": APP_VERSION,
         "cwd": os.getcwd(),
         "python": shell_output(["python", "--version"]),
-        "python_which": shell_output(["/bin/sh", "-lc", "which python || true"]),
-        "python_version_files": shell_output(["/bin/sh", "-lc", "printf '.python-version='; cat .python-version 2>/dev/null || true; printf '\nruntime.txt='; cat runtime.txt 2>/dev/null || true"]),
         "which_chromium": shell_output(["/bin/sh", "-lc", "which chromium || true"]),
         "which_chromium_browser": shell_output(["/bin/sh", "-lc", "which chromium-browser || true"]),
         "which_chromedriver": shell_output(["/bin/sh", "-lc", "which chromedriver || true"]),
         "ls_usr_bin_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/bin/chromium /usr/bin/chromedriver 2>&1 || true"]),
-        "ls_usr_lib_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/lib/chromium/chromium /usr/lib/chromium/chromedriver 2>&1 || true"]),
         "dpkg_chromium": shell_output(["/bin/sh", "-lc", "dpkg -l | grep -E 'chromium|chromedriver|chrome' || true"]),
         "selenium_cache": shell_output(["/bin/sh", "-lc", "ls -la /home/appuser/.cache/selenium 2>&1 || true"]),
     }
@@ -445,7 +435,7 @@ def validate_chrome_runtime() -> Dict[str, object]:
             "Streamlit Cloud did not detect the required browser dependencies: "
             + ", ".join(missing)
             + ". Please confirm packages.txt is in the GitHub repo root and contains exactly two lines: chromium and chromium-driver."
-            + " Also confirm .python-version and runtime.txt are committed in the repo root. After fixing it, reboot the app, clear cache, and redeploy."
+            + " After fixing it, reboot the app, clear cache, and redeploy."
         )
 
     return runtime
@@ -457,7 +447,7 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
 
     # Streamlit Cloud is more stable when Chrome does not wait for every tracking,
     # image, or async pricing request. We open the page quickly, then poll DOM prices.
-    chrome_options.page_load_strategy = "none"
+    chrome_options.page_load_strategy = "eager"
 
     # Fresh profile per browser attempt prevents stale lock files from killing Chrome.
     # The directory path is also stored as a capability-adjacent custom attribute so
@@ -465,51 +455,34 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
     chrome_options._starwood_user_data_dir = user_data_dir  # type: ignore[attr-defined]
 
-    # IMPORTANT CLOUD FIX v3:
-    # ChromeDriver log explicitly recommends pipe mode. Streamlit Cloud can kill
-    # Chromium during DevTools port startup even when --remote-debugging-port=0 is
-    # used. Pipe mode avoids TCP port allocation entirely and is more stable in
-    # restricted containers.
-    #
-    # Keep the launch flags conservative. Over-aggressive flags such as
-    # --single-process, --no-zygote, or disabling the software rasterizer can make
-    # Debian Chromium exit before the WebDriver session is created.
+    # IMPORTANT FIX:
+    # - Do not use a fixed remote debugging port like 9222; Streamlit reruns can collide.
+    # - Do not use --single-process; it is fragile in Debian/Streamlit containers.
+    # - Keep both primary and fallback on random debug ports.
     chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--remote-debugging-pipe")
+    chrome_options.add_argument("--remote-debugging-port=0")
 
-    cache_dir = tempfile.mkdtemp(prefix="starwood_chrome_cache_")
-    chrome_options._starwood_cache_dir = cache_dir  # type: ignore[attr-defined]
+    if fallback_mode:
+        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-    chrome_options.add_argument(f"--data-path={cache_dir}")
-    chrome_options.add_argument(f"--disk-cache-dir={cache_dir}")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-networking")
     chrome_options.add_argument("--disable-default-apps")
     chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--disable-component-update")
-    chrome_options.add_argument("--disable-crash-reporter")
-    chrome_options.add_argument("--disable-breakpad")
     chrome_options.add_argument("--metrics-recording-only")
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--no-default-browser-check")
-    chrome_options.add_argument("--password-store=basic")
-    chrome_options.add_argument("--use-mock-keychain")
-    chrome_options.add_argument("--ozone-platform=headless")
+    chrome_options.add_argument("--disable-setuid-sandbox")
+    chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
-
-    if fallback_mode:
-        # Fallback keeps the same non-blocking navigation strategy.
-        # Do not switch to normal page load here, because Streamlit Cloud can hang
-        # while waiting for third-party booking-page requests to finish.
-        chrome_options.page_load_strategy = "none"
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -523,10 +496,8 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
 def cleanup_chrome_profile(chrome_options: Options) -> None:
     """Remove the temporary Chrome profile created for one Selenium attempt."""
     user_data_dir = getattr(chrome_options, "_starwood_user_data_dir", None)
-    cache_dir = getattr(chrome_options, "_starwood_cache_dir", None)
-    for path in (user_data_dir, cache_dir):
-        if path and isinstance(path, str) and os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
+    if user_data_dir and isinstance(user_data_dir, str) and os.path.isdir(user_data_dir):
+        shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
@@ -536,33 +507,16 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
 
     # CRITICAL: always pass Service(executable_path=...).
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
-    log_file = tempfile.NamedTemporaryFile(prefix="starwood_chromedriver_", suffix=".log", delete=False)
-    log_file_path = log_file.name
-    log_file.close()
-    service = Service(
-        executable_path=chromedriver_binary,
-        log_output=log_file_path,
-        service_args=["--verbose"],
-    )
+    service = Service(executable_path=chromedriver_binary)
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
     try:
         driver = webdriver.Chrome(service=service, options=chrome_options)
-    except Exception as exc:
-        try:
-            with open(log_file_path, "r", encoding="utf-8", errors="replace") as handle:
-                log_tail = handle.read()[-5000:]
-        except Exception:
-            log_tail = ""
+    except Exception:
         cleanup_chrome_profile(chrome_options)
-        raise RuntimeError(
-            f"ChromeDriver could not create a browser session. "
-            f"chromium_binary={chromium_binary}; chromedriver_binary={chromedriver_binary}; "
-            f"fallback_mode={fallback_mode}; chromedriver_log_tail={log_tail}"
-        ) from exc
+        raise
 
     # Keep a reference so scrape_1hotels_once can clean the temp Chrome profile.
     driver._starwood_chrome_options = chrome_options  # type: ignore[attr-defined]
-    driver._starwood_chromedriver_log = log_file_path  # type: ignore[attr-defined]
 
     # The page shell normally loads quickly; live rates arrive shortly after via JS.
     # Keep timeout short and let poll_rooms_after_page_open collect prices.
@@ -840,369 +794,6 @@ def poll_rooms_after_page_open(driver: webdriver.Chrome, max_seconds: float = 6.
     }
 
 
-
-
-def find_free_local_port() -> int:
-    """Return a free localhost TCP port for direct Chrome DevTools Protocol mode."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def wait_for_cdp_json(port: int, path: str = "/json/version", timeout_seconds: float = 8.0) -> Dict[str, object]:
-    """Wait until headless Chromium exposes the DevTools JSON endpoint."""
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    url = f"http://127.0.0.1:{port}{path}"
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=1.0) as response:
-                payload = response.read().decode("utf-8", errors="replace")
-                return json.loads(payload)
-        except Exception as exc:
-            last_error = str(exc)
-            time.sleep(0.15)
-    raise RuntimeError(f"Chrome DevTools endpoint did not become ready on port {port}. Last error: {last_error}")
-
-
-def open_cdp_page(port: int, target_url: str) -> Dict[str, object]:
-    """Create a new CDP tab and navigate to the booking URL."""
-    encoded_url = urllib.parse.quote(target_url, safe="")
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}/json/new?{encoded_url}",
-        method="PUT",
-    )
-    with urllib.request.urlopen(request, timeout=3.0) as response:
-        payload = response.read().decode("utf-8", errors="replace")
-        return json.loads(payload)
-
-
-class CdpClient:
-    """Tiny Chrome DevTools Protocol client to avoid ChromeDriver/Selenium startup hangs."""
-
-    def __init__(self, websocket_url: str):
-        try:
-            import websocket  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "Missing dependency websocket-client. Add websocket-client to requirements.txt."
-            ) from exc
-        self.ws = websocket.create_connection(websocket_url, timeout=3)
-        self.next_id = 0
-
-    def close(self) -> None:
-        try:
-            self.ws.close()
-        except Exception:
-            pass
-
-    def send(self, method: str, params: Optional[Dict[str, object]] = None, timeout: float = 5.0) -> Dict[str, object]:
-        self.next_id += 1
-        message_id = self.next_id
-        payload = {"id": message_id, "method": method, "params": params or {}}
-        self.ws.settimeout(timeout)
-        self.ws.send(json.dumps(payload))
-        deadline = time.monotonic() + timeout
-        last_event: Dict[str, object] = {}
-        while time.monotonic() < deadline:
-            raw = self.ws.recv()
-            data = json.loads(raw)
-            if "id" not in data:
-                last_event = data
-                continue
-            if int(data.get("id", -1)) == message_id:
-                if "error" in data:
-                    raise RuntimeError(f"CDP {method} failed: {data['error']}")
-                return data
-        raise RuntimeError(f"CDP {method} timed out. Last event: {last_event}")
-
-    def evaluate(self, expression: str, timeout: float = 5.0) -> object:
-        response = self.send(
-            "Runtime.evaluate",
-            {
-                "expression": expression,
-                "returnByValue": True,
-                "awaitPromise": True,
-            },
-            timeout=timeout,
-        )
-        result = response.get("result", {}).get("result", {})
-        if isinstance(result, dict) and "value" in result:
-            return result.get("value")
-        return None
-
-
-CDP_PARSE_ROOMS_SCRIPT = r"""
-(() => {
-  const priceRegex = /^([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/;
-  const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
-  const rows = [];
-
-  function cleanText(value) {
-    return (value || '').replace(/\s+/g, ' ').trim();
-  }
-
-  function isRoomLike(value) {
-    const text = cleanText(value).toLowerCase();
-    return text.length >= 4 && text.length <= 90 &&
-      /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony)/i.test(text);
-  }
-
-  function getCard(node) {
-    return node.closest('[data-scope="carousel"][data-part="item"]') ||
-           node.closest('.chakra-card__root') ||
-           node.closest('article') ||
-           node.closest('section') ||
-           node.parentElement;
-  }
-
-  for (const titleNode of titleNodes) {
-    const roomName = cleanText(titleNode.innerText || titleNode.textContent);
-    if (!isRoomLike(roomName)) continue;
-
-    const card = getCard(titleNode);
-    if (!card) continue;
-
-    const priceNodes = Array.from(card.querySelectorAll('p,span,div,label'));
-    const pPrices = [];
-    const allPrices = [];
-
-    for (const node of priceNodes) {
-      const text = cleanText(node.innerText || node.textContent);
-      if (!priceRegex.test(text)) continue;
-      if (/amenity|fee|tax|total|include/i.test(text)) continue;
-
-      const match = text.match(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*([0-9][0-9,]*)/);
-      if (!match) continue;
-      const symbol = match[1] || '$';
-      const value = parseInt(match[2].replace(/,/g, ''), 10);
-      if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
-
-      allPrices.push({value, symbol});
-      if (node.tagName.toLowerCase() === 'p') {
-        pPrices.push({value, symbol});
-      }
-    }
-
-    const candidatePrices = pPrices.length ? pPrices : allPrices;
-    if (!candidatePrices.length) continue;
-
-    const bestPrice = candidatePrices.reduce((best, item) => item.value < best.value ? item : best, candidatePrices[0]);
-
-    rows.push({
-      room_name: roomName,
-      current_selling: bestPrice.value,
-      currency_symbol: bestPrice.symbol || '$',
-      all_detected_prices: Array.from(new Set(allPrices.map(item => item.value))).sort((a, b) => a - b),
-    });
-  }
-
-  return JSON.stringify(rows);
-})()
-"""
-
-
-def build_chrome_cdp_command(chromium_binary: str, port: int, user_data_dir: str, cache_dir: str, fallback_mode: bool = False) -> List[str]:
-    """Build a direct Chromium command. No ChromeDriver/Selenium is involved."""
-    command = [
-        chromium_binary,
-        "--headless=new" if not fallback_mode else "--headless",
-        f"--remote-debugging-port={port}",
-        "--remote-allow-origins=*",
-        f"--user-data-dir={user_data_dir}",
-        f"--data-path={cache_dir}",
-        f"--disk-cache-dir={cache_dir}",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-setuid-sandbox",
-        "--disable-gpu",
-        "--disable-extensions",
-        "--disable-background-networking",
-        "--disable-default-apps",
-        "--disable-sync",
-        "--disable-component-update",
-        "--disable-crash-reporter",
-        "--disable-breakpad",
-        "--metrics-recording-only",
-        "--mute-audio",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--use-mock-keychain",
-        "--window-size=1920,1400",
-        "--disable-blink-features=AutomationControlled",
-        "--lang=en-US,en",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-        "about:blank",
-    ]
-    if fallback_mode:
-        command.insert(2, "--disable-features=VizDisplayCompositor,Translate,BackForwardCache")
-    return command
-
-
-def scrape_1hotels_cdp_once(url: str, wait_seconds: int = 10, fallback_mode: bool = False) -> Dict:
-    """
-    Scrape via direct Chrome DevTools Protocol.
-
-    This bypasses ChromeDriver completely. It fixes Streamlit Cloud cases where
-    Selenium hangs for 60s at Browser.getVersion before a session is created.
-    """
-    runtime = validate_chrome_runtime()
-    chromium_binary = str(runtime["chromium_binary"])
-    port = find_free_local_port()
-    user_data_dir = tempfile.mkdtemp(prefix="starwood_cdp_profile_")
-    cache_dir = tempfile.mkdtemp(prefix="starwood_cdp_cache_")
-    process: Optional[subprocess.Popen] = None
-    client: Optional[CdpClient] = None
-    started_at = time.monotonic()
-
-    try:
-        command = build_chrome_cdp_command(
-            chromium_binary=chromium_binary,
-            port=port,
-            user_data_dir=user_data_dir,
-            cache_dir=cache_dir,
-            fallback_mode=fallback_mode,
-        )
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-
-        wait_for_cdp_json(port, timeout_seconds=8.0 if not fallback_mode else 10.0)
-        target = open_cdp_page(port, url)
-        websocket_url = str(target.get("webSocketDebuggerUrl") or "")
-        if not websocket_url:
-            raise RuntimeError(f"Chrome did not return a page websocket URL. Target response: {target}")
-
-        client = CdpClient(websocket_url)
-        client.send("Page.enable", timeout=3.0)
-        client.send("Runtime.enable", timeout=3.0)
-        client.send("Page.navigate", {"url": url}, timeout=3.0)
-
-        deadline = time.monotonic() + float(max(wait_seconds, 8))
-        best_raw_rooms: List[Dict] = []
-        best_rooms: List[Dict] = []
-        cycles = 0
-        stable_cycles = 0
-        last_count = 0
-
-        while time.monotonic() < deadline:
-            ratio = [0, 0.28, 0.55, 0.82, 1.0, 0.35][cycles % 6]
-            client.evaluate(
-                f"window.scrollTo(0, Math.floor(Math.max(document.body ? document.body.scrollHeight : 0, document.documentElement ? document.documentElement.scrollHeight : 0) * {ratio})); true;",
-                timeout=2.0,
-            )
-            time.sleep(0.55 if cycles < 3 else 0.35)
-            raw_value = client.evaluate(CDP_PARSE_ROOMS_SCRIPT, timeout=4.0)
-            raw_rooms = json.loads(raw_value or "[]") if isinstance(raw_value, str) else []
-            rooms = dedupe_rooms(raw_rooms)
-            cycles += 1
-
-            if len(rooms) > len(best_rooms):
-                best_raw_rooms = raw_rooms
-                best_rooms = rooms
-                stable_cycles = 0
-                last_count = len(rooms)
-            elif rooms and len(rooms) == last_count:
-                stable_cycles += 1
-            else:
-                last_count = len(rooms)
-
-            if best_rooms and stable_cycles >= 2:
-                break
-
-        html_source_value = client.evaluate("document.documentElement.outerHTML", timeout=4.0)
-        html_source = str(html_source_value or "")
-        rooms = best_rooms
-        if not rooms and html_source:
-            rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
-
-        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True) if html_source else ""
-        return {
-            "ok": True,
-            "rooms": rooms,
-            "raw_count": len(best_raw_rooms),
-            "page_text_preview": page_text[:3500],
-            "html_preview": html_source[:3500],
-            "attempt_mode": "cdp-fallback" if fallback_mode else "cdp-primary",
-            "get_timed_out": False,
-            "body_seen": bool(html_source),
-            "poll_cycles": cycles,
-            "poll_elapsed_seconds": round(time.monotonic() - started_at, 2),
-            "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
-        }
-    except Exception as exc:
-        raise RuntimeError(
-            f"CDP Chromium scrape failed. chromium_binary={chromium_binary}; port={port}; "
-            f"fallback_mode={fallback_mode}; error={exc}"
-        ) from exc
-    finally:
-        if client is not None:
-            client.close()
-        if process is not None:
-            try:
-                process.terminate()
-                process.wait(timeout=3)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-        shutil.rmtree(user_data_dir, ignore_errors=True)
-        shutil.rmtree(cache_dir, ignore_errors=True)
-
-
-def scrape_1hotels_cdp(url: str, wait_seconds: int = 10, retry_once: bool = True) -> Dict:
-    attempts = [False, True] if retry_once else [False]
-    history: List[Dict[str, object]] = []
-    last_exception: Optional[Exception] = None
-    last_result: Optional[Dict] = None
-
-    for attempt_index, fallback_mode in enumerate(attempts, start=1):
-        mode_name = "cdp-fallback" if fallback_mode else "cdp-primary"
-        try:
-            result = scrape_1hotels_cdp_once(url=url, wait_seconds=wait_seconds + (2 if fallback_mode else 0), fallback_mode=fallback_mode)
-            rooms = result.get("rooms", [])
-            history.append(
-                {
-                    "attempt": attempt_index,
-                    "mode": mode_name,
-                    "status": "ok",
-                    "rooms_count": len(rooms),
-                    "body_seen": result.get("body_seen", False),
-                    "poll_cycles": result.get("poll_cycles", 0),
-                    "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
-                    "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
-                }
-            )
-            result["retry_history"] = history
-            last_result = result
-            if rooms:
-                return result
-        except Exception as exc:
-            last_exception = exc
-            history.append(
-                {
-                    "attempt": attempt_index,
-                    "mode": mode_name,
-                    "status": "failed",
-                    "error": str(exc),
-                }
-            )
-            time.sleep(0.5)
-
-    if last_result is not None:
-        last_result["retry_history"] = history
-        return last_result
-
-    raise RuntimeError(
-        "CDP primary search failed and CDP fallback retry also failed. "
-        f"Retry history: {history}. Last error: {last_exception}"
-    ) from last_exception
-
 def scrape_1hotels_once(
     url: str,
     wait_seconds: int = 10,
@@ -1225,17 +816,16 @@ def scrape_1hotels_once(
             get_timed_out = True
 
         try:
-            WebDriverWait(driver, 4 if fallback_mode else 2).until(
+            WebDriverWait(driver, max(3, min(int(wait_seconds), 10))).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             body_seen = True
         except TimeoutException:
             body_seen = False
 
-        # Non-blocking navigation: do not wait for every third-party request.
-        # Poll the DOM directly for async room prices. This prevents the app from
-        # sitting on the spinner while the booking engine keeps network requests open.
-        price_poll_seconds = 7.0 if fallback_mode else 6.0
+        # Main mode: page shell up to 10s, then about 6s of price polling.
+        # Fallback adds a tiny buffer only; it should not become slower than the old version.
+        price_poll_seconds = 8.0 if fallback_mode else 6.0
         poll_result = poll_rooms_after_page_open(driver, max_seconds=price_poll_seconds)
         raw_rooms = list(poll_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
@@ -1270,16 +860,67 @@ def scrape_1hotels_once(
 
 
 def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, retry_once: bool = True) -> Dict:
-    """
-    Main scraper entrypoint.
+    attempts = [False, True] if retry_once else [False]
+    history: List[Dict[str, object]] = []
+    last_result: Optional[Dict] = None
+    last_exception: Optional[Exception] = None
 
-    v5 intentionally uses direct Chrome DevTools Protocol first and does not
-    attempt Selenium/ChromeDriver by default. In Streamlit Cloud, ChromeDriver can
-    hang for 60 seconds during InitSession / Browser.getVersion even when Chrome
-    itself is installed correctly. CDP uses the same Chromium binary directly and
-    avoids the WebDriver session-creation bottleneck.
-    """
-    return scrape_1hotels_cdp(url=url, wait_seconds=wait_seconds, retry_once=retry_once)
+    for attempt_index, fallback_mode in enumerate(attempts, start=1):
+        mode_name = "fallback" if fallback_mode else "primary"
+        try:
+            result = scrape_1hotels_once(
+                url=url,
+                wait_seconds=12 if fallback_mode else wait_seconds,
+                settle_seconds=settle_seconds,
+                fallback_mode=fallback_mode,
+            )
+            rooms = result.get("rooms", [])
+            history.append(
+                {
+                    "attempt": attempt_index,
+                    "mode": mode_name,
+                    "status": "ok",
+                    "rooms_count": len(rooms),
+                    "get_timed_out": result.get("get_timed_out", False),
+                    "body_seen": result.get("body_seen", False),
+                    "poll_cycles": result.get("poll_cycles", 0),
+                    "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
+                    "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
+                }
+            )
+            result["retry_history"] = history
+            last_result = result
+
+            if rooms:
+                return result
+
+            if attempt_index < len(attempts):
+                time.sleep(0.8)
+                continue
+
+            return result
+        except Exception as exc:
+            last_exception = exc
+            history.append(
+                {
+                    "attempt": attempt_index,
+                    "mode": mode_name,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            if attempt_index < len(attempts):
+                time.sleep(0.8)
+                continue
+
+    if last_result is not None:
+        last_result["retry_history"] = history
+        return last_result
+
+    raise RuntimeError(
+        "Primary search failed and fallback retry also failed. "
+        f"Retry history: {history}. Last error: {last_exception}"
+    ) from last_exception
 
 
 ROOM_CATEGORY_ORDER = ["Hotel Rooms", "Homes", "Connecting"]
@@ -1571,11 +1212,11 @@ if search_clicked:
     room_nights_for_search = max((checkout - checkin).days, 1)
     adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
     with st.spinner(
-        f"Opening booking page quickly, then polling live prices for 6s. "
-        f"Automatic fallback is disabled to avoid long Streamlit Cloud hangs."
+        f"Opening booking page for up to {adaptive_wait_seconds}s, then polling live prices for 6s. "
+        f"Fallback adds a short second attempt only if no price is found."
     ):
         try:
-            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=False)
+            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
