@@ -381,8 +381,13 @@ def version_of(binary_path: Optional[str]) -> str:
 
 @st.cache_resource(show_spinner=False)
 def get_chrome_runtime() -> Dict[str, object]:
+    # Prefer the real Chromium binary over the /usr/bin/chromium shell wrapper.
+    # On Debian/Streamlit Cloud, ChromeDriver can report "Chrome instance exited"
+    # when binary_location points to the wrapper instead of /usr/lib/chromium/chromium.
     chromium_binary = first_existing_executable(
         [
+            "/usr/lib/chromium/chromium",
+            "/usr/lib/chromium-browser/chromium-browser",
             "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
             "/usr/bin/google-chrome",
@@ -407,6 +412,7 @@ def get_chrome_runtime() -> Dict[str, object]:
         "which_chromium_browser": shell_output(["/bin/sh", "-lc", "which chromium-browser || true"]),
         "which_chromedriver": shell_output(["/bin/sh", "-lc", "which chromedriver || true"]),
         "ls_usr_bin_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/bin/chromium /usr/bin/chromedriver 2>&1 || true"]),
+        "ls_usr_lib_chromium": shell_output(["/bin/sh", "-lc", "ls -l /usr/lib/chromium/chromium /usr/lib/chromium/chromedriver 2>&1 || true"]),
         "dpkg_chromium": shell_output(["/bin/sh", "-lc", "dpkg -l | grep -E 'chromium|chromedriver|chrome' || true"]),
         "selenium_cache": shell_output(["/bin/sh", "-lc", "ls -la /home/appuser/.cache/selenium 2>&1 || true"]),
     }
@@ -457,20 +463,24 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
 
     # IMPORTANT FIX:
     # - Do not use a fixed remote debugging port like 9222; Streamlit reruns can collide.
+    # - Do not force --remote-debugging-port=0; ChromeDriver will assign the port safely.
     # - Do not use --single-process; it is fragile in Debian/Streamlit containers.
-    # - Keep both primary and fallback on random debug ports.
+    # - Do not disable the software rasterizer; Debian Chromium can exit immediately without it.
     chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--remote-debugging-port=0")
+
+    cache_dir = tempfile.mkdtemp(prefix="starwood_chrome_cache_")
+    chrome_options._starwood_cache_dir = cache_dir  # type: ignore[attr-defined]
 
     if fallback_mode:
-        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame")
+        chrome_options.add_argument("--no-zygote")
+        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame,VizDisplayCompositor")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    chrome_options.add_argument(f"--data-path={cache_dir}")
+    chrome_options.add_argument(f"--disk-cache-dir={cache_dir}")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-networking")
     chrome_options.add_argument("--disable-default-apps")
@@ -496,8 +506,10 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
 def cleanup_chrome_profile(chrome_options: Options) -> None:
     """Remove the temporary Chrome profile created for one Selenium attempt."""
     user_data_dir = getattr(chrome_options, "_starwood_user_data_dir", None)
-    if user_data_dir and isinstance(user_data_dir, str) and os.path.isdir(user_data_dir):
-        shutil.rmtree(user_data_dir, ignore_errors=True)
+    cache_dir = getattr(chrome_options, "_starwood_cache_dir", None)
+    for path in (user_data_dir, cache_dir):
+        if path and isinstance(path, str) and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
@@ -507,16 +519,33 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
 
     # CRITICAL: always pass Service(executable_path=...).
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
-    service = Service(executable_path=chromedriver_binary)
+    log_file = tempfile.NamedTemporaryFile(prefix="starwood_chromedriver_", suffix=".log", delete=False)
+    log_file_path = log_file.name
+    log_file.close()
+    service = Service(
+        executable_path=chromedriver_binary,
+        log_output=log_file_path,
+        service_args=["--verbose"],
+    )
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
     try:
         driver = webdriver.Chrome(service=service, options=chrome_options)
-    except Exception:
+    except Exception as exc:
+        try:
+            with open(log_file_path, "r", encoding="utf-8", errors="replace") as handle:
+                log_tail = handle.read()[-5000:]
+        except Exception:
+            log_tail = ""
         cleanup_chrome_profile(chrome_options)
-        raise
+        raise RuntimeError(
+            f"ChromeDriver could not create a browser session. "
+            f"chromium_binary={chromium_binary}; chromedriver_binary={chromedriver_binary}; "
+            f"fallback_mode={fallback_mode}; chromedriver_log_tail={log_tail}"
+        ) from exc
 
     # Keep a reference so scrape_1hotels_once can clean the temp Chrome profile.
     driver._starwood_chrome_options = chrome_options  # type: ignore[attr-defined]
+    driver._starwood_chromedriver_log = log_file_path  # type: ignore[attr-defined]
 
     # The page shell normally loads quickly; live rates arrive shortly after via JS.
     # Keep timeout short and let poll_rooms_after_page_open collect prices.
