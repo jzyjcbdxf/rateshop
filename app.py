@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-stable-v2"
+APP_VERSION = "2026-07-07 Starwood Hotel Rateshop cloud-chrome-pipe-v3"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -408,6 +408,8 @@ def get_chrome_runtime() -> Dict[str, object]:
         "app_version": APP_VERSION,
         "cwd": os.getcwd(),
         "python": shell_output(["python", "--version"]),
+        "python_which": shell_output(["/bin/sh", "-lc", "which python || true"]),
+        "python_version_files": shell_output(["/bin/sh", "-lc", "printf '.python-version='; cat .python-version 2>/dev/null || true; printf '\nruntime.txt='; cat runtime.txt 2>/dev/null || true"]),
         "which_chromium": shell_output(["/bin/sh", "-lc", "which chromium || true"]),
         "which_chromium_browser": shell_output(["/bin/sh", "-lc", "which chromium-browser || true"]),
         "which_chromedriver": shell_output(["/bin/sh", "-lc", "which chromedriver || true"]),
@@ -441,7 +443,7 @@ def validate_chrome_runtime() -> Dict[str, object]:
             "Streamlit Cloud did not detect the required browser dependencies: "
             + ", ".join(missing)
             + ". Please confirm packages.txt is in the GitHub repo root and contains exactly two lines: chromium and chromium-driver."
-            + " After fixing it, reboot the app, clear cache, and redeploy."
+            + " Also confirm .python-version and runtime.txt are committed in the repo root. After fixing it, reboot the app, clear cache, and redeploy."
         )
 
     return runtime
@@ -461,38 +463,50 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
     chrome_options._starwood_user_data_dir = user_data_dir  # type: ignore[attr-defined]
 
-    # IMPORTANT FIX:
-    # - Do not use a fixed remote debugging port like 9222; Streamlit reruns can collide.
-    # - Do not force --remote-debugging-port=0; ChromeDriver will assign the port safely.
-    # - Do not use --single-process; it is fragile in Debian/Streamlit containers.
-    # - Do not disable the software rasterizer; Debian Chromium can exit immediately without it.
+    # IMPORTANT CLOUD FIX v3:
+    # ChromeDriver log explicitly recommends pipe mode. Streamlit Cloud can kill
+    # Chromium during DevTools port startup even when --remote-debugging-port=0 is
+    # used. Pipe mode avoids TCP port allocation entirely and is more stable in
+    # restricted containers.
+    #
+    # Keep the launch flags conservative. Over-aggressive flags such as
+    # --single-process, --no-zygote, or disabling the software rasterizer can make
+    # Debian Chromium exit before the WebDriver session is created.
     chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--remote-debugging-pipe")
 
     cache_dir = tempfile.mkdtemp(prefix="starwood_chrome_cache_")
     chrome_options._starwood_cache_dir = cache_dir  # type: ignore[attr-defined]
-
-    if fallback_mode:
-        chrome_options.add_argument("--no-zygote")
-        chrome_options.add_argument("--disable-features=Translate,BackForwardCache,AcceptCHFrame,VizDisplayCompositor")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     chrome_options.add_argument(f"--data-path={cache_dir}")
     chrome_options.add_argument(f"--disk-cache-dir={cache_dir}")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-networking")
     chrome_options.add_argument("--disable-default-apps")
     chrome_options.add_argument("--disable-sync")
+    chrome_options.add_argument("--disable-component-update")
+    chrome_options.add_argument("--disable-crash-reporter")
+    chrome_options.add_argument("--disable-breakpad")
     chrome_options.add_argument("--metrics-recording-only")
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--disable-infobars")
+    chrome_options.add_argument("--no-default-browser-check")
+    chrome_options.add_argument("--password-store=basic")
+    chrome_options.add_argument("--use-mock-keychain")
+    chrome_options.add_argument("--ozone-platform=headless")
     chrome_options.add_argument("--window-size=1920,1400")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--lang=en-US,en")
+
+    if fallback_mode:
+        # Fallback is intentionally *less* customized, not more. It only changes
+        # page-load behavior below; Chrome launch flags stay the same.
+        chrome_options.page_load_strategy = "normal"
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
