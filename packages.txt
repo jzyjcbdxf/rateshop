@@ -1,2 +1,4 @@
 chromium
 chromium-driver
+chromium-sandbox
+fonts-liberation
