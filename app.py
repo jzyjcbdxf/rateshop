@@ -734,49 +734,87 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     }
 
     function parsePrices(card) {
-      const priceNodes = collectElements(card).filter(el => /^(P|SPAN|DIV|LABEL|BUTTON|A|LI)$/i.test(el.tagName || ''));
+      // IMPORTANT: The correct displayed selling price in the current 1 Hotels UI is the
+      // standalone paragraph node, for example:
+      //   <p class="css-1oc1v88">$5,435</p>
+      // The same rate row also contains crossed-out original prices such as <s>$8,439</s>,
+      // discount badges such as "36% off", and package copy such as "$250 Credit".
+      // Reading broad card text will therefore contaminate prices. Only accept exact,
+      // visible paragraph price nodes first; use broader parsing only as a last resort.
+      const exactPriceRegex = /^\s*([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)\s*$/i;
+      const allElements = collectElements(card);
       const allPrices = [];
       const sellingPrices = [];
 
-      for (const node of priceNodes) {
-        const text = elementText(node);
-        const match = text.match(priceRegex);
-        if (!match) continue;
+      function isVisible(node) {
+        if (!node) return false;
+        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+        if (!style) return true;
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) return false;
+        return true;
+      }
 
-        // Ignore fees/taxes/policy text and crossed-out/original price elements.
-        if (/amenity|fee|tax|total|include|included|resort|destination|deposit|due now/i.test(text)) continue;
+      function isCrossedOut(node) {
+        if (!node) return false;
         const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
         const decoration = style ? String(style.textDecorationLine || style.textDecoration || '') : '';
-        if (/line-through/i.test(decoration)) continue;
-        if (node.closest && node.closest('s, strike, del')) continue;
+        if (/line-through/i.test(decoration)) return true;
+        if (node.closest && node.closest('s, strike, del')) return true;
+        return false;
+      }
 
-        const symbol = match[1] || '$';
+      function pushExactPrice(node, target) {
+        const text = elementText(node);
+        const match = text.match(exactPriceRegex);
+        if (!match) return false;
+        if (!isVisible(node) || isCrossedOut(node)) return false;
         const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
-        if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
+        if (!Number.isFinite(value) || value <= 0 || value > 20000) return false;
+        target.push({value, symbol: match[1] || '$'});
+        return true;
+      }
 
-        const item = {value, symbol};
-        allPrices.push(item);
+      // Primary, user-confirmed selector from DevTools screenshot.
+      for (const node of allElements) {
+        const tagName = String(node.tagName || '').toUpperCase();
+        const className = String(node.className || '');
+        if (tagName === 'P' && /(^|\s)css-1oc1v88(\s|$)/.test(className)) {
+          pushExactPrice(node, sellingPrices);
+        }
+      }
 
-        const tagName = (node.tagName || '').toLowerCase();
-        const parentText = elementText(node.parentElement || node);
-        const nodeClass = String(node.className || '');
-        const parentClass = String((node.parentElement && node.parentElement.className) || '');
+      // Secondary fallback: exact standalone <p>$123</p> nodes only. This still avoids
+      // package descriptions like "Nonrefundable: $250 Credit" because those are not
+      // exact price-only paragraphs.
+      if (!sellingPrices.length) {
+        for (const node of allElements) {
+          const tagName = String(node.tagName || '').toUpperCase();
+          if (tagName === 'P') pushExactPrice(node, sellingPrices);
+        }
+      }
 
-        // Prefer the visible selling-rate text. Avoid discount badges like "34% off"
-        // and avoid large container text that bundles multiple rates together.
-        if (
-          text.length <= 80 &&
-          !/%\s*off/i.test(text) &&
-          !/was|original|strike/i.test(text) &&
-          (
-            tagName === 'p' ||
-            /avg\s*\/\s*night|average|night|rate/i.test(parentText) ||
-            /price|rate/i.test(nodeClass + ' ' + parentClass)
-          )
-        ) {
+      for (const item of sellingPrices) allPrices.push(item);
+
+      // Last-resort fallback only if the site changes markup and no standalone p price
+      // nodes are present. Keep this strict and exclude known contamination terms.
+      if (!sellingPrices.length) {
+        const priceNodes = allElements.filter(el => /^(P|SPAN)$/i.test(el.tagName || ''));
+        for (const node of priceNodes) {
+          const text = elementText(node);
+          if (!text || text.length > 80) continue;
+          const match = text.match(priceRegex);
+          if (!match) continue;
+          if (/amenity|fee|tax|total|include|included|resort|destination|deposit|due now|credit|transfer|breakfast|parking|spa|package/i.test(text)) continue;
+          if (/%\s*off|was|original|strike/i.test(text)) continue;
+          if (!isVisible(node) || isCrossedOut(node)) continue;
+          const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
+          if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
+          const item = {value, symbol: match[1] || '$'};
+          allPrices.push(item);
           sellingPrices.push(item);
         }
       }
+
       return {allPrices, sellingPrices};
     }
 
@@ -1136,25 +1174,69 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
 
         selling_prices: List[Dict[str, object]] = []
         all_prices: List[Dict[str, object]] = []
-        for node in card.find_all(["p", "span", "label", "button", "a", "li"]):
-            text = node.get_text(" ", strip=True)
-            if not text or not PRICE_RE.search(text):
-                continue
-            if re.search(r"amenity|fee|tax|total|include|included|resort|destination|deposit|due now", text, re.I):
-                continue
+        exact_price_re = re.compile(
+            r"^\s*([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)\s*$",
+            re.I,
+        )
+
+        def node_is_crossed_out(node) -> bool:
             if node.find_parent(["s", "strike", "del"]):
-                continue
+                return True
             style_value = " ".join(str(node.get(attr, "")) for attr in ["style", "class"])
-            if re.search(r"line-through|strike|original", style_value, re.I):
-                continue
-            parsed_price = parse_price_match(text)
-            if not parsed_price:
-                continue
-            price = int(parsed_price["amount"])
-            if price <= 0 or price > 20000:
-                continue
-            all_prices.append(parsed_price)
-            if len(text) <= 90 and not re.search(r"%\s*off|was|original|strike", text, re.I):
+            return bool(re.search(r"line-through|strike|original", style_value, re.I))
+
+        def parse_exact_node_price(node) -> Optional[Dict[str, object]]:
+            text = node.get_text(" ", strip=True)
+            match = exact_price_re.match(text or "")
+            if not match or node_is_crossed_out(node):
+                return None
+            try:
+                amount = int(match.group(2).replace(",", ""))
+            except ValueError:
+                return None
+            if amount <= 0 or amount > 20000:
+                return None
+            return {"amount": amount, "symbol": match.group(1) or "$"}
+
+        # Primary, user-confirmed selector from DevTools screenshot:
+        # <p class="css-1oc1v88">$5,435</p>
+        for node in card.find_all("p", class_=lambda c: c and "css-1oc1v88" in str(c).split()):
+            parsed_price = parse_exact_node_price(node)
+            if parsed_price:
+                selling_prices.append(parsed_price)
+
+        # Secondary fallback: exact standalone paragraph price nodes only.
+        # This avoids polluted text like "$250 Credit", "All rates include $66 amenity fee",
+        # and crossed-out original rates.
+        if not selling_prices:
+            for node in card.find_all("p"):
+                parsed_price = parse_exact_node_price(node)
+                if parsed_price:
+                    selling_prices.append(parsed_price)
+
+        all_prices.extend(selling_prices)
+
+        # Last-resort fallback if the markup class changes. Keep this narrow.
+        if not selling_prices:
+            for node in card.find_all(["p", "span"]):
+                text = node.get_text(" ", strip=True)
+                if not text or len(text) > 80 or not PRICE_RE.search(text):
+                    continue
+                if re.search(
+                    r"amenity|fee|tax|total|include|included|resort|destination|deposit|due now|credit|transfer|breakfast|parking|spa|package|%\s*off|was|original|strike",
+                    text,
+                    re.I,
+                ):
+                    continue
+                if node_is_crossed_out(node):
+                    continue
+                parsed_price = parse_price_match(text)
+                if not parsed_price:
+                    continue
+                price = int(parsed_price["amount"])
+                if price <= 0 or price > 20000:
+                    continue
+                all_prices.append(parsed_price)
                 selling_prices.append(parsed_price)
 
         candidate_prices = selling_prices or all_prices
