@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-09 Starwood Hotel Rateshop iframe-shadow-price-parser"
+APP_VERSION = "2026-07-09 Starwood Hotel Rateshop clean-room-card-price-parser"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -70,6 +70,30 @@ ROOM_NAME_HINTS = (
     "two",
     "one",
     "balcony",
+)
+
+# Text that can appear inside a room card but is not a room type.
+# This prevents rate labels, warnings, CTA text, and availability badges from
+# being treated as room names simply because they contain the word "room".
+ROOM_NAME_BLOCKLIST_RE = re.compile(
+    r"(?:"
+    r"price\s+is\s+subject\s+to\s+change|"
+    r"must\s+be\s+18|"
+    r"room\s+left|"
+    r"rooms?\s+left|"
+    r"select\s+room|"
+    r"available\s+rates?|"
+    r"avg\s*/?\s*night|"
+    r"average\s+size|"
+    r"non[-\s]?refundable|"
+    r"flexible\s+cancellation|"
+    r"all\s+rates\s+include|"
+    r"amenity\s+fee|"
+    r"per\s+night|"
+    r"best\s+offer|"
+    r"currently\s+selling"
+    r")",
+    re.I,
 )
 
 PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
@@ -539,6 +563,10 @@ def looks_like_room_name(name: str) -> bool:
     cleaned = normalize_room_name(name)
     if len(cleaned) < 4 or len(cleaned) > 90:
         return False
+    if PRICE_RE.search(cleaned):
+        return False
+    if ROOM_NAME_BLOCKLIST_RE.search(cleaned):
+        return False
     lower_name = cleaned.lower()
     return any(hint in lower_name for hint in ROOM_NAME_HINTS)
 
@@ -584,133 +612,145 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
-    """Parse room prices from the current browsing context, including shadow DOM."""
+    """
+    Parse room-card prices from the current browsing context, including open shadow DOM.
+
+    Important: do not infer room names from arbitrary text inside the card. The 1 Hotels
+    booking UI contains labels such as "1 Room Left!", "Select Room", and policy copy
+    inside the same card. Those contain the word "room" and can be near prices, so they
+    must never be used as room type titles.
+    """
     script = r"""
     const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
     const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i;
+    const blockedTitleRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night|best\s+offer|currently\s+selling)/i;
     const rows = [];
 
     function cleanText(value) {
       return (value || '').replace(/\s+/g, ' ').trim();
     }
 
-    function collectElements(root) {
-      const out = [];
-      const seen = new Set();
-
-      function walk(node) {
-        if (!node || seen.has(node)) return;
-        seen.add(node);
-
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          out.push(node);
-          if (node.shadowRoot) walk(node.shadowRoot);
-        }
-
-        const children = node.children ? Array.from(node.children) : [];
-        for (const child of children) walk(child);
-      }
-
-      walk(root || document.body || document.documentElement);
-      return out;
-    }
-
-    const allElements = collectElements(document.body || document.documentElement);
-
-    function isRoomLike(value) {
-      const text = cleanText(value).toLowerCase();
-      return text.length >= 4 && text.length <= 90 && roomRegex.test(text);
-    }
-
     function elementText(element) {
       return cleanText(element ? (element.innerText || element.textContent || '') : '');
     }
 
+    function collectElements(root) {
+      const out = [];
+      const seen = new Set();
+      function walk(node) {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          out.push(node);
+          if (node.shadowRoot) walk(node.shadowRoot);
+        }
+        const children = node.children ? Array.from(node.children) : [];
+        for (const child of children) walk(child);
+      }
+      walk(root || document.body || document.documentElement);
+      return out;
+    }
+
+    function isRoomTitle(value) {
+      const text = cleanText(value);
+      if (text.length < 4 || text.length > 90) return false;
+      if (priceRegex.test(text)) return false;
+      if (blockedTitleRegex.test(text)) return false;
+      return roomRegex.test(text);
+    }
+
+    function nearestRoomCard(titleNode) {
+      if (!titleNode) return null;
+      const selectors = [
+        '[data-scope="carousel"][data-part="item"]',
+        '.chakra-card__root',
+        '[class*="chakra-card"]',
+        'article',
+        'section'
+      ];
+      for (const selector of selectors) {
+        try {
+          const card = titleNode.closest(selector);
+          if (card) return card;
+        } catch (error) {}
+      }
+      let node = titleNode.parentElement || (titleNode.getRootNode && titleNode.getRootNode().host) || null;
+      for (let depth = 0; node && depth < 6; depth += 1) {
+        const text = elementText(node);
+        if (priceRegex.test(text) && text.length >= 30 && text.length <= 4500) return node;
+        node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+      }
+      return null;
+    }
+
     function findRoomTitle(card) {
       const cardElements = collectElements(card);
-      const headings = cardElements.filter(el => /^(H1|H2|H3|H4|H5|H6)$/i.test(el.tagName || '') || el.getAttribute('role') === 'heading');
-      for (const heading of headings) {
-        const headingText = elementText(heading);
-        if (isRoomLike(headingText) && !priceRegex.test(headingText)) return headingText;
+
+      // Primary selector from the current 1 Hotels/Selfbook UI:
+      // <h3 class="chakra-card__title ...">City View King</h3>
+      const titleSelectors = [
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        '[role="heading"]',
+        '[class*="card__title"]',
+        '[class*="card_title"]'
+      ];
+      const seen = new Set();
+      const candidates = [];
+      for (const selector of titleSelectors) {
+        try {
+          for (const node of card.querySelectorAll(selector)) {
+            if (!seen.has(node)) {
+              seen.add(node);
+              candidates.push(node);
+            }
+          }
+        } catch (error) {}
       }
 
-      const candidates = cardElements.filter(el => /^(P|SPAN|DIV|A|BUTTON)$/i.test(el.tagName || ''));
       for (const node of candidates) {
         const text = elementText(node);
-        if (isRoomLike(text) && !priceRegex.test(text)) return text;
+        if (isRoomTitle(text)) return text;
       }
       return '';
     }
 
-    function addCard(cards, seen, card) {
-      if (!card || seen.has(card)) return;
-      const text = elementText(card);
-      if (!priceRegex.test(text)) return;
-      if (!roomRegex.test(text)) return;
-      if (text.length < 12 || text.length > 3500) return;
-      seen.add(card);
-      cards.push(card);
-    }
-
     function collectCandidateCards() {
+      const allElements = collectElements(document.body || document.documentElement);
       const cards = [];
-      const seen = new Set();
-
-      const selectorMatches = [];
-      for (const selector of [
-        '[data-scope="carousel"][data-part="item"]',
-        '.chakra-card__root',
-        'article',
-        'section',
-        '[class*="room"]',
-        '[class*="rate"]',
-        '[data-testid*="room"]',
-        '[data-testid*="rate"]'
-      ]) {
-        try {
-          selectorMatches.push(...Array.from(document.querySelectorAll(selector)));
-        } catch (error) {}
-      }
-      for (const card of selectorMatches) addCard(cards, seen, card);
-
+      const seenCards = new Set();
       const titleNodes = allElements.filter(el => {
-        const text = elementText(el);
-        return isRoomLike(text) && !priceRegex.test(text);
+        const tagName = String(el.tagName || '').toUpperCase();
+        const isHeading = /^(H1|H2|H3|H4|H5|H6)$/.test(tagName) || el.getAttribute('role') === 'heading' || /card__title|card_title/i.test(String(el.className || ''));
+        return isHeading && isRoomTitle(elementText(el));
       });
 
       for (const titleNode of titleNodes) {
-        let node = titleNode;
-        for (let depth = 0; node && depth < 9; depth += 1) {
-          const text = elementText(node);
-          if (priceRegex.test(text) && text.length <= 3500) {
-            addCard(cards, seen, node);
-            break;
-          }
-          node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
-        }
+        const card = nearestRoomCard(titleNode);
+        if (!card || seenCards.has(card)) continue;
+        const text = elementText(card);
+        if (!priceRegex.test(text)) continue;
+        seenCards.add(card);
+        cards.push(card);
       }
-
-      // Last-resort cards: smallest elements that contain both a room-like word and a price.
-      for (const element of allElements) {
-        const text = elementText(element);
-        if (text.length < 20 || text.length > 1400) continue;
-        if (!priceRegex.test(text) || !roomRegex.test(text)) continue;
-        addCard(cards, seen, element);
-      }
-
       return cards;
     }
 
     function parsePrices(card) {
       const priceNodes = collectElements(card).filter(el => /^(P|SPAN|DIV|LABEL|BUTTON|A|LI)$/i.test(el.tagName || ''));
       const allPrices = [];
-      const preferredPrices = [];
+      const sellingPrices = [];
 
       for (const node of priceNodes) {
         const text = elementText(node);
         const match = text.match(priceRegex);
         if (!match) continue;
+
+        // Ignore fees/taxes/policy text and crossed-out/original price elements.
         if (/amenity|fee|tax|total|include|included|resort|destination|deposit|due now/i.test(text)) continue;
+        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+        const decoration = style ? String(style.textDecorationLine || style.textDecoration || '') : '';
+        if (/line-through/i.test(decoration)) continue;
+        if (node.closest && node.closest('s, strike, del')) continue;
 
         const symbol = match[1] || '$';
         const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
@@ -718,12 +758,28 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
 
         const item = {value, symbol};
         allPrices.push(item);
+
         const tagName = (node.tagName || '').toLowerCase();
-        if (tagName === 'p' || /per night|night|avg|average|from|rate/i.test(text)) {
-          preferredPrices.push(item);
+        const parentText = elementText(node.parentElement || node);
+        const nodeClass = String(node.className || '');
+        const parentClass = String((node.parentElement && node.parentElement.className) || '');
+
+        // Prefer the visible selling-rate text. Avoid discount badges like "34% off"
+        // and avoid large container text that bundles multiple rates together.
+        if (
+          text.length <= 80 &&
+          !/%\s*off/i.test(text) &&
+          !/was|original|strike/i.test(text) &&
+          (
+            tagName === 'p' ||
+            /avg\s*\/\s*night|average|night|rate/i.test(parentText) ||
+            /price|rate/i.test(nodeClass + ' ' + parentClass)
+          )
+        ) {
+          sellingPrices.push(item);
         }
       }
-      return {allPrices, preferredPrices};
+      return {allPrices, sellingPrices};
     }
 
     for (const card of collectCandidateCards()) {
@@ -731,7 +787,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
       if (!roomName) continue;
 
       const parsed = parsePrices(card);
-      const candidatePrices = parsed.preferredPrices.length ? parsed.preferredPrices : parsed.allPrices;
+      const candidatePrices = parsed.sellingPrices.length ? parsed.sellingPrices : parsed.allPrices;
       if (!candidatePrices.length) continue;
 
       const bestPrice = candidatePrices.reduce((best, item) => item.value < best.value ? item : best, candidatePrices[0]);
@@ -750,7 +806,6 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     except Exception:
         return []
     return rows if isinstance(rows, list) else []
-
 
 def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
     """Return True if the current document or any open shadow root contains a price-looking string."""
