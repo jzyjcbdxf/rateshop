@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-09 Starwood Hotel Rateshop long-stay-extra-price-wait"
+APP_VERSION = "2026-07-09 Starwood Hotel Rateshop robust-price-wait-v2"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -72,7 +72,7 @@ ROOM_NAME_HINTS = (
     "balcony",
 )
 
-PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*(?P<amount>[0-9][0-9,]*)")
+PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
@@ -585,8 +585,7 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     script = r"""
-    const priceRegex = /^([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*[0-9][0-9,]*/;
-    const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4'));
+    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
     const rows = [];
 
     function cleanText(value) {
@@ -596,55 +595,104 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     function isRoomLike(value) {
       const text = cleanText(value).toLowerCase();
       return text.length >= 4 && text.length <= 90 &&
-        /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony)/i.test(text);
+        /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i.test(text);
     }
 
-    function getCard(node) {
-      return node.closest('[data-scope="carousel"][data-part="item"]') ||
-             node.closest('.chakra-card__root') ||
-             node.closest('article') ||
-             node.closest('section') ||
-             node.parentElement;
-    }
+    function findRoomTitle(card) {
+      const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
+      if (heading) {
+        const headingText = cleanText(heading.innerText || heading.textContent);
+        if (isRoomLike(headingText)) return headingText;
+      }
 
-    for (const titleNode of titleNodes) {
-      const roomName = cleanText(titleNode.innerText || titleNode.textContent);
-      if (!isRoomLike(roomName)) continue;
-
-      const card = getCard(titleNode);
-      if (!card) continue;
-
-      const priceNodes = Array.from(card.querySelectorAll('p,span,div,label'));
-      const pPrices = [];
-      const allPrices = [];
-
-      for (const node of priceNodes) {
+      const candidates = Array.from(card.querySelectorAll('p,span,div,a,button'));
+      for (const node of candidates) {
         const text = cleanText(node.innerText || node.textContent);
-        if (!priceRegex.test(text)) continue;
-        if (/amenity|fee|tax|total|include/i.test(text)) continue;
+        if (isRoomLike(text) && !priceRegex.test(text)) return text;
+      }
+      return '';
+    }
 
-        const match = text.match(/([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP)\s*([0-9][0-9,]*)/);
-        if (!match) continue;
-        const symbol = match[1] || '$';
-        const value = parseInt(match[2].replace(/,/g, ''), 10);
-        if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
+    function collectCandidateCards() {
+      const selectors = [
+        '[data-scope="carousel"][data-part="item"]',
+        '.chakra-card__root',
+        'article',
+        'section'
+      ];
+      const cards = [];
+      const seen = new Set();
 
-        allPrices.push({value, symbol});
-        if (node.tagName.toLowerCase() === 'p') {
-          pPrices.push({value, symbol});
+      for (const selector of selectors) {
+        for (const card of Array.from(document.querySelectorAll(selector))) {
+          if (seen.has(card)) continue;
+          const text = cleanText(card.innerText || card.textContent);
+          if (!priceRegex.test(text)) continue;
+          if (!/(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i.test(text)) continue;
+          seen.add(card);
+          cards.push(card);
         }
       }
 
-      const candidatePrices = pPrices.length ? pPrices : allPrices;
+      const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]'));
+      for (const titleNode of titleNodes) {
+        const roomName = cleanText(titleNode.innerText || titleNode.textContent);
+        if (!isRoomLike(roomName)) continue;
+        let node = titleNode;
+        for (let depth = 0; node && depth < 7; depth += 1) {
+          const text = cleanText(node.innerText || node.textContent);
+          if (priceRegex.test(text)) {
+            if (!seen.has(node)) {
+              seen.add(node);
+              cards.push(node);
+            }
+            break;
+          }
+          node = node.parentElement;
+        }
+      }
+      return cards;
+    }
+
+    function parsePrices(card) {
+      const priceNodes = Array.from(card.querySelectorAll('p,span,div,label,button'));
+      const allPrices = [];
+      const preferredPrices = [];
+
+      for (const node of priceNodes) {
+        const text = cleanText(node.innerText || node.textContent);
+        const match = text.match(priceRegex);
+        if (!match) continue;
+        if (/amenity|fee|tax|total|include|included|resort|destination/i.test(text)) continue;
+
+        const symbol = match[1] || '$';
+        const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
+        if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
+
+        const item = {value, symbol};
+        allPrices.push(item);
+        const tagName = node.tagName.toLowerCase();
+        if (tagName === 'p' || /per night|night|avg|from/i.test(text)) {
+          preferredPrices.push(item);
+        }
+      }
+      return {allPrices, preferredPrices};
+    }
+
+    for (const card of collectCandidateCards()) {
+      const roomName = findRoomTitle(card);
+      if (!roomName) continue;
+
+      const parsed = parsePrices(card);
+      const candidatePrices = parsed.preferredPrices.length ? parsed.preferredPrices : parsed.allPrices;
       if (!candidatePrices.length) continue;
 
       const bestPrice = candidatePrices.reduce((best, item) => item.value < best.value ? item : best, candidatePrices[0]);
-
       rows.push({
         room_name: roomName,
         current_selling: bestPrice.value,
         currency_symbol: bestPrice.symbol || '$',
-        all_detected_prices: Array.from(new Set(allPrices.map(item => item.value))).sort((a, b) => a - b),
+        all_detected_prices: Array.from(new Set(parsed.allPrices.map(item => item.value))).sort((a, b) => a - b),
       });
     }
 
@@ -655,7 +703,6 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     except Exception:
         return []
     return rows if isinstance(rows, list) else []
-
 
 def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
     soup = BeautifulSoup(html_source, "html.parser")
@@ -708,7 +755,7 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
 
 
 def scroll_booking_page_once(driver: webdriver.Chrome, step_index: int) -> None:
-    """Small scrolls trigger lazy-loaded room cards and price nodes without wasting time."""
+    """Scroll enough to trigger lazy-loaded room cards and async price nodes."""
     try:
         driver.execute_script(
             """
@@ -716,51 +763,81 @@ def scroll_booking_page_once(driver: webdriver.Chrome, step_index: int) -> None:
               document.body ? document.body.scrollHeight : 0,
               document.documentElement ? document.documentElement.scrollHeight : 0
             );
-            const positions = [0, 0.28, 0.55, 0.82, 1.0, 0.35];
+            const positions = [0, 0.18, 0.36, 0.54, 0.72, 0.9, 1.0, 0.55, 0.25];
             const ratio = positions[step_index % positions.length];
-            window.scrollTo(0, Math.floor(height * ratio));
+            window.scrollTo({top: Math.floor(height * ratio), behavior: 'instant'});
             """
         )
     except Exception:
         pass
 
 
-def poll_rooms_after_page_open(driver: webdriver.Chrome, max_seconds: float = 6.0) -> Dict[str, object]:
+def warm_up_lazy_loaded_rates(driver: webdriver.Chrome) -> None:
+    """Do one quick full-page scroll sweep before parsing prices."""
+    for index in range(7):
+        scroll_booking_page_once(driver, index)
+        time.sleep(0.25)
+    try:
+        driver.execute_script("window.scrollTo(0, 0);")
+    except Exception:
+        pass
+
+
+def room_fingerprint(rooms: List[Dict]) -> str:
+    parts = []
+    for room in rooms:
+        parts.append(f"{normalize_room_name(str(room.get('room_name', ''))).lower()}={room.get('current_selling')}")
+    return "|".join(sorted(parts))
+
+
+def poll_rooms_after_page_open(
+    driver: webdriver.Chrome,
+    max_seconds: float = 10.0,
+    min_seconds: float = 6.0,
+) -> Dict[str, object]:
     """
     Poll the already-open booking page for live prices.
 
-    The page shell can load first, then prices usually appear about 2 seconds later.
-    This loop parses repeatedly and returns as soon as room prices are present and
-    stable for a couple of quick cycles.
+    This deliberately does not stop after the first stable-looking result. On this
+    booking page, the first one or two room cards can appear before the rest of the
+    rates finish rendering, especially after lazy scrolling. The loop keeps polling
+    for at least min_seconds and only exits after several unchanged cycles.
     """
     start_time = time.monotonic()
     best_raw_rooms: List[Dict] = []
     best_rooms: List[Dict] = []
+    best_fingerprint = ""
     stable_cycles = 0
-    last_count = 0
     cycles = 0
+    seen_price_text = False
+
+    max_seconds = max(3.0, float(max_seconds))
+    min_seconds = min(max(1.0, float(min_seconds)), max_seconds)
 
     while time.monotonic() - start_time <= max_seconds:
         scroll_booking_page_once(driver, cycles)
-        time.sleep(0.45)
+        time.sleep(0.55)
 
         raw_rooms = parse_rooms_with_browser_dom(driver)
         rooms = dedupe_rooms(raw_rooms)
+        fingerprint = room_fingerprint(rooms)
         cycles += 1
 
-        if len(rooms) > len(best_rooms):
+        if rooms:
+            seen_price_text = True
+
+        if len(rooms) > len(best_rooms) or (len(rooms) == len(best_rooms) and fingerprint and fingerprint != best_fingerprint):
             best_raw_rooms = raw_rooms
             best_rooms = rooms
+            best_fingerprint = fingerprint
             stable_cycles = 0
-            last_count = len(rooms)
-        elif rooms and len(rooms) == last_count:
+        elif fingerprint and fingerprint == best_fingerprint:
             stable_cycles += 1
         else:
-            last_count = len(rooms)
+            stable_cycles = 0
 
-        # Prices often show up shortly after the shell. Once the count is stable,
-        # stop immediately instead of waiting for the full timeout.
-        if best_rooms and stable_cycles >= 2:
+        elapsed = time.monotonic() - start_time
+        if best_rooms and elapsed >= min_seconds and stable_cycles >= 5:
             break
 
     try:
@@ -772,9 +849,9 @@ def poll_rooms_after_page_open(driver: webdriver.Chrome, max_seconds: float = 6.
         "raw_rooms": best_raw_rooms,
         "rooms": best_rooms,
         "cycles": cycles,
+        "seen_price_text": seen_price_text,
         "elapsed_seconds": round(time.monotonic() - start_time, 2),
     }
-
 
 def scrape_1hotels_once(
     url: str,
@@ -814,17 +891,28 @@ def scrape_1hotels_once(
         price_settle_seconds = max(0.0, float(settle_seconds))
         time.sleep(price_settle_seconds)
 
+        # Trigger lazy-loaded room cards before parsing. Without this, headless Chrome
+        # can see the page shell but miss prices that render only after scrolling.
+        warm_up_lazy_loaded_rates(driver)
+
         # Main mode uses the configured price polling window. Fallback gets a small
         # extra buffer because it only runs after primary returns no prices or fails.
-        effective_price_poll_seconds = max(1.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
-        poll_result = poll_rooms_after_page_open(driver, max_seconds=effective_price_poll_seconds)
+        effective_price_poll_seconds = max(8.0, float(price_poll_seconds)) + (4.0 if fallback_mode else 0.0)
+        minimum_price_poll_seconds = min(6.0 if not fallback_mode else 8.0, effective_price_poll_seconds)
+        poll_result = poll_rooms_after_page_open(
+            driver,
+            max_seconds=effective_price_poll_seconds,
+            min_seconds=minimum_price_poll_seconds,
+        )
         raw_rooms = list(poll_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
 
         html_source = driver.page_source
-        if not rooms:
-            # One final cheap HTML parse in case prices are in page_source but DOM script missed them.
-            rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
+        # Always merge the final page_source parse. The JavaScript DOM parser and
+        # BeautifulSoup parser catch slightly different render shapes.
+        bs4_rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
+        if bs4_rooms:
+            rooms = dedupe_rooms(raw_rooms + bs4_rooms)
 
         page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True)
         return {
@@ -839,7 +927,9 @@ def scrape_1hotels_once(
             "page_load_timeout_seconds": page_load_timeout_seconds,
             "price_settle_seconds": price_settle_seconds,
             "price_poll_seconds": effective_price_poll_seconds,
+            "minimum_price_poll_seconds": minimum_price_poll_seconds,
             "poll_cycles": poll_result.get("cycles", 0),
+            "seen_price_text": poll_result.get("seen_price_text", False),
             "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
@@ -882,7 +972,9 @@ def scrape_1hotels(
                     "page_load_timeout_seconds": result.get("page_load_timeout_seconds", 0),
                     "price_settle_seconds": result.get("price_settle_seconds", 0),
                     "price_poll_seconds": result.get("price_poll_seconds", 0),
+                    "minimum_price_poll_seconds": result.get("minimum_price_poll_seconds", 0),
                     "poll_cycles": result.get("poll_cycles", 0),
+                    "seen_price_text": result.get("seen_price_text", False),
                     "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
                     "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
                 }
@@ -1214,15 +1306,15 @@ if search_clicked:
     if is_long_date_search:
         adaptive_wait_seconds = int(min(25, max(int(wait_seconds) + 5, 15)))
         price_settle_seconds = 5.0
-        price_poll_seconds = 10.0
+        price_poll_seconds = 14.0
     else:
         adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
         price_settle_seconds = 3.0
-        price_poll_seconds = 6.0
+        price_poll_seconds = 10.0
 
     with st.spinner(
         f"Opening booking page for up to {adaptive_wait_seconds}s, waiting {price_settle_seconds:g}s for async prices, "
-        f"then polling live prices for {price_poll_seconds:g}s. "
+        f"then scrolling and polling live prices for at least 6s / up to {price_poll_seconds:g}s. "
         f"Fallback adds a short second attempt only if no price is found."
     ):
         try:
