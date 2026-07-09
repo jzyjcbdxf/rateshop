@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-06-30 Starwood Hotel Rateshop 10s-page-open-price-poll"
+APP_VERSION = "2026-07-09 Starwood Hotel Rateshop long-stay-extra-price-wait"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -779,7 +779,8 @@ def poll_rooms_after_page_open(driver: webdriver.Chrome, max_seconds: float = 6.
 def scrape_1hotels_once(
     url: str,
     wait_seconds: int = 10,
-    settle_seconds: int = 0,
+    settle_seconds: float = 3.0,
+    price_poll_seconds: float = 6.0,
     fallback_mode: bool = False,
 ) -> Dict:
     driver = None
@@ -789,6 +790,8 @@ def scrape_1hotels_once(
 
     try:
         driver = init_driver(fallback_mode=fallback_mode)
+        page_load_timeout_seconds = max(10, int(wait_seconds))
+        driver.set_page_load_timeout(page_load_timeout_seconds)
 
         try:
             driver.get(url)
@@ -798,17 +801,23 @@ def scrape_1hotels_once(
             get_timed_out = True
 
         try:
-            WebDriverWait(driver, max(3, min(int(wait_seconds), 10))).until(
+            WebDriverWait(driver, max(3, int(wait_seconds))).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             body_seen = True
         except TimeoutException:
             body_seen = False
 
-        # Main mode: page shell up to 10s, then about 6s of price polling.
-        # Fallback adds a tiny buffer only; it should not become slower than the old version.
-        price_poll_seconds = 8.0 if fallback_mode else 6.0
-        poll_result = poll_rooms_after_page_open(driver, max_seconds=price_poll_seconds)
+        # After the page body appears, wait briefly before reading prices.
+        # The page shell can render before the asynchronous rate component finishes,
+        # so scraping immediately can capture missing or incomplete prices.
+        price_settle_seconds = max(0.0, float(settle_seconds))
+        time.sleep(price_settle_seconds)
+
+        # Main mode uses the configured price polling window. Fallback gets a small
+        # extra buffer because it only runs after primary returns no prices or fails.
+        effective_price_poll_seconds = max(1.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
+        poll_result = poll_rooms_after_page_open(driver, max_seconds=effective_price_poll_seconds)
         raw_rooms = list(poll_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
 
@@ -827,6 +836,9 @@ def scrape_1hotels_once(
             "attempt_mode": "fallback" if fallback_mode else "primary",
             "get_timed_out": get_timed_out,
             "body_seen": body_seen,
+            "page_load_timeout_seconds": page_load_timeout_seconds,
+            "price_settle_seconds": price_settle_seconds,
+            "price_poll_seconds": effective_price_poll_seconds,
             "poll_cycles": poll_result.get("cycles", 0),
             "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
@@ -836,7 +848,13 @@ def scrape_1hotels_once(
             driver.quit()
 
 
-def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, retry_once: bool = True) -> Dict:
+def scrape_1hotels(
+    url: str,
+    wait_seconds: int = 10,
+    settle_seconds: float = 3.0,
+    price_poll_seconds: float = 6.0,
+    retry_once: bool = True,
+) -> Dict:
     attempts = [False, True] if retry_once else [False]
     history: List[Dict[str, object]] = []
     last_result: Optional[Dict] = None
@@ -847,8 +865,9 @@ def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, re
         try:
             result = scrape_1hotels_once(
                 url=url,
-                wait_seconds=12 if fallback_mode else wait_seconds,
+                wait_seconds=(int(wait_seconds) + 2) if fallback_mode else int(wait_seconds),
                 settle_seconds=settle_seconds,
+                price_poll_seconds=price_poll_seconds,
                 fallback_mode=fallback_mode,
             )
             rooms = result.get("rooms", [])
@@ -860,6 +879,9 @@ def scrape_1hotels(url: str, wait_seconds: int = 10, settle_seconds: int = 0, re
                     "rooms_count": len(rooms),
                     "get_timed_out": result.get("get_timed_out", False),
                     "body_seen": result.get("body_seen", False),
+                    "page_load_timeout_seconds": result.get("page_load_timeout_seconds", 0),
+                    "price_settle_seconds": result.get("price_settle_seconds", 0),
+                    "price_poll_seconds": result.get("price_poll_seconds", 0),
                     "poll_cycles": result.get("poll_cycles", 0),
                     "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
                     "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
@@ -1187,13 +1209,30 @@ if "generated_email" not in st.session_state:
 
 if search_clicked:
     room_nights_for_search = max((checkout - checkin).days, 1)
-    adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
+    is_long_date_search = room_nights_for_search > 3
+
+    if is_long_date_search:
+        adaptive_wait_seconds = int(min(25, max(int(wait_seconds) + 5, 15)))
+        price_settle_seconds = 5.0
+        price_poll_seconds = 10.0
+    else:
+        adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
+        price_settle_seconds = 3.0
+        price_poll_seconds = 6.0
+
     with st.spinner(
-        f"Opening booking page for up to {adaptive_wait_seconds}s, then polling live prices for 6s. "
+        f"Opening booking page for up to {adaptive_wait_seconds}s, waiting {price_settle_seconds:g}s for async prices, "
+        f"then polling live prices for {price_poll_seconds:g}s. "
         f"Fallback adds a short second attempt only if no price is found."
     ):
         try:
-            result = scrape_1hotels(target_url, wait_seconds=adaptive_wait_seconds, retry_once=True)
+            result = scrape_1hotels(
+                target_url,
+                wait_seconds=adaptive_wait_seconds,
+                settle_seconds=price_settle_seconds,
+                price_poll_seconds=price_poll_seconds,
+                retry_once=True,
+            )
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
