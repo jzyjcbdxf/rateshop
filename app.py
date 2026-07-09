@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-09 Starwood Hotel Rateshop clean-room-card-price-parser"
+APP_VERSION = "2026-07-09 Starwood Hotel Rateshop strict-card-parser-app-ready-reload"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -477,17 +477,16 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     # Streamlit Cloud when a previous browser process exits slowly or crashes.
     user_data_dir = tempfile.mkdtemp(prefix="starwood_chrome_profile_")
 
+    # Keep Chrome closer to a normal browser. The Selfbook React app can fail to
+    # hydrate in headless Chrome when --single-process or a fixed debugging port is
+    # used on Streamlit Cloud. Use a random debugging port for every run and avoid
+    # --single-process.
     if fallback_mode:
-        # Fallback mode is intentionally more conservative. It avoids --single-process
-        # and uses a random remote debugging port, which helps when the first browser
-        # startup or page load is flaky in Streamlit Cloud.
         chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument("--disable-features=VizDisplayCompositor")
     else:
         chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--single-process")
+    chrome_options.add_argument("--remote-debugging-port=0")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
     chrome_options.add_argument("--no-sandbox")
@@ -495,7 +494,6 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-background-networking")
     chrome_options.add_argument("--disable-default-apps")
     chrome_options.add_argument("--disable-sync")
     chrome_options.add_argument("--metrics-recording-only")
@@ -837,6 +835,148 @@ def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
         return False
 
 
+
+def get_booking_app_state(driver: webdriver.Chrome) -> Dict[str, object]:
+    """Inspect whether the React/Selfbook booking app has actually hydrated."""
+    script = r"""
+    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    const roomTitleRegex = /(king|queen|suite|studio|home|ocean|city|skyline|balcony|connecting|two\s+queens|two\s+kings|one\s+bedroom)/i;
+    const blockedRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night)/i;
+
+    function cleanText(value) {
+      return (value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function collectElements(root) {
+      const out = [];
+      const seen = new Set();
+      function walk(node) {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          out.push(node);
+          if (node.shadowRoot) walk(node.shadowRoot);
+        }
+        const children = node.children ? Array.from(node.children) : [];
+        for (const child of children) walk(child);
+      }
+      walk(root || document.body || document.documentElement);
+      return out;
+    }
+
+    const root = document.querySelector('#root');
+    const bodyText = cleanText(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+    const elements = collectElements(document.body || document.documentElement);
+    const titleNodes = elements.filter(el => {
+      const tagName = String(el.tagName || '').toUpperCase();
+      const className = String(el.className || '');
+      const role = el.getAttribute ? el.getAttribute('role') : '';
+      const isTitleNode = /^(H1|H2|H3|H4|H5|H6)$/.test(tagName) || role === 'heading' || /card__title|card_title/i.test(className);
+      if (!isTitleNode) return false;
+      const text = cleanText(el.innerText || el.textContent || '');
+      return text.length >= 4 && text.length <= 90 && roomTitleRegex.test(text) && !blockedRegex.test(text) && !priceRegex.test(text);
+    });
+    const cards = elements.filter(el => {
+      const className = String(el.className || '');
+      const dataScope = el.getAttribute ? el.getAttribute('data-scope') : '';
+      const dataPart = el.getAttribute ? el.getAttribute('data-part') : '';
+      return (dataScope === 'carousel' && dataPart === 'item') || /chakra-card__root|chakra-card/i.test(className);
+    });
+
+    return {
+      url: String(location.href || ''),
+      readyState: String(document.readyState || ''),
+      rootExists: !!root,
+      rootChildCount: root ? root.children.length : 0,
+      bodyTextLength: bodyText.length,
+      bodyPreview: bodyText.slice(0, 700),
+      titleCount: titleNodes.length,
+      cardCount: cards.length,
+      priceTextFound: priceRegex.test(bodyText),
+      titlePreview: titleNodes.slice(0, 8).map(el => cleanText(el.innerText || el.textContent || '')),
+    };
+    """
+    try:
+        state = driver.execute_script(script)
+        return state if isinstance(state, dict) else {}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def wait_for_booking_app_ready(driver: webdriver.Chrome, max_seconds: float = 18.0) -> Dict[str, object]:
+    """
+    Wait for the React booking app to hydrate, not just for <body> to exist.
+
+    The failed long-date screenshot shows <body> with an empty #root and only Chakra
+    portal/select nodes. In that state Selenium sees body_seen=True, but there is no
+    bookable room DOM to parse. This function waits for real room card titles/prices.
+    """
+    start_time = time.monotonic()
+    states: List[Dict[str, object]] = []
+    last_state: Dict[str, object] = {}
+
+    while time.monotonic() - start_time <= max_seconds:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        state = get_booking_app_state(driver)
+        last_state = state
+        states.append(state)
+
+        title_count = int(state.get("titleCount", 0) or 0)
+        card_count = int(state.get("cardCount", 0) or 0)
+        price_found = bool(state.get("priceTextFound", False))
+        root_child_count = int(state.get("rootChildCount", 0) or 0)
+        body_text_length = int(state.get("bodyTextLength", 0) or 0)
+
+        if title_count >= 1 and (card_count >= 1 or price_found):
+            break
+        if root_child_count > 0 and body_text_length > 1200 and (title_count >= 1 or price_found):
+            break
+
+        # A small scroll/clickless nudge helps Chakra carousel content mount after the app shell hydrates.
+        try:
+            scroll_booking_page_once(driver, len(states))
+        except Exception:
+            pass
+        time.sleep(0.75)
+
+    return {
+        "elapsed_seconds": round(time.monotonic() - start_time, 2),
+        "last_state": last_state,
+        "samples": states[-4:],
+    }
+
+
+def reload_if_booking_root_is_empty(driver: webdriver.Chrome, wait_seconds: int, app_ready_result: Dict[str, object]) -> Dict[str, object]:
+    """Reload once when the booking app shell is stuck with an empty #root."""
+    last_state = app_ready_result.get("last_state", {}) if isinstance(app_ready_result, dict) else {}
+    root_exists = bool(last_state.get("rootExists", False))
+    root_child_count = int(last_state.get("rootChildCount", 0) or 0)
+    title_count = int(last_state.get("titleCount", 0) or 0)
+    price_found = bool(last_state.get("priceTextFound", False))
+
+    if root_exists and root_child_count == 0 and title_count == 0 and not price_found:
+        try:
+            driver.refresh()
+        except TimeoutException:
+            pass
+        except Exception:
+            pass
+        try:
+            WebDriverWait(driver, max(5, int(wait_seconds))).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+        except TimeoutException:
+            pass
+        retry_ready = wait_for_booking_app_ready(driver, max_seconds=max(12.0, min(float(wait_seconds), 35.0)))
+        retry_ready["reloaded_empty_root"] = True
+        return retry_ready
+
+    app_ready_result["reloaded_empty_root"] = False
+    return app_ready_result
+
 def count_current_context_iframes(driver: webdriver.Chrome) -> int:
     try:
         return len(driver.find_elements(By.CSS_SELECTOR, "iframe"))
@@ -961,29 +1101,51 @@ def collect_page_sources_from_all_contexts(driver: webdriver.Chrome, max_depth: 
     return sources
 
 def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
+    """
+    Conservative fallback parser for final page_source only.
+
+    It intentionally reads room names only from heading/card title nodes. It does not
+    infer room names from arbitrary text because policy copy and CTA labels can contain
+    the word "room" and contaminate the result.
+    """
     soup = BeautifulSoup(html_source, "html.parser")
     raw_rooms: List[Dict] = []
 
-    for title in soup.find_all(["h1", "h2", "h3", "h4"]):
+    title_nodes = []
+    for selector in ["h1", "h2", "h3", "h4", "h5", "h6", '[role="heading"]']:
+        title_nodes.extend(soup.select(selector))
+    title_nodes.extend(
+        node for node in soup.find_all(class_=lambda c: c and ("card__title" in str(c) or "card_title" in str(c)))
+        if node not in title_nodes
+    )
+
+    for title in title_nodes:
         room_name = normalize_room_name(title.get_text(" ", strip=True))
         if not looks_like_room_name(room_name):
             continue
 
         card = title.find_parent(attrs={"data-scope": "carousel", "data-part": "item"})
         if card is None:
-            card = title.find_parent(class_=lambda c: c and "chakra-card__root" in c)
+            card = title.find_parent(class_=lambda c: c and "chakra-card__root" in str(c))
         if card is None:
-            card = title.find_parent(["article", "section", "div"])
+            card = title.find_parent(class_=lambda c: c and "chakra-card" in str(c))
+        if card is None:
+            card = title.find_parent(["article", "section"])
         if card is None:
             continue
 
-        p_prices: List[Dict[str, object]] = []
+        selling_prices: List[Dict[str, object]] = []
         all_prices: List[Dict[str, object]] = []
-        for node in card.find_all(["p", "span", "div", "label"]):
+        for node in card.find_all(["p", "span", "label", "button", "a", "li"]):
             text = node.get_text(" ", strip=True)
             if not text or not PRICE_RE.search(text):
                 continue
-            if re.search(r"amenity|fee|tax|total|include", text, re.I):
+            if re.search(r"amenity|fee|tax|total|include|included|resort|destination|deposit|due now", text, re.I):
+                continue
+            if node.find_parent(["s", "strike", "del"]):
+                continue
+            style_value = " ".join(str(node.get(attr, "")) for attr in ["style", "class"])
+            if re.search(r"line-through|strike|original", style_value, re.I):
                 continue
             parsed_price = parse_price_match(text)
             if not parsed_price:
@@ -992,10 +1154,10 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
             if price <= 0 or price > 20000:
                 continue
             all_prices.append(parsed_price)
-            if node.name == "p":
-                p_prices.append(parsed_price)
+            if len(text) <= 90 and not re.search(r"%\s*off|was|original|strike", text, re.I):
+                selling_prices.append(parsed_price)
 
-        candidate_prices = p_prices or all_prices
+        candidate_prices = selling_prices or all_prices
         if candidate_prices:
             best_price = min(candidate_prices, key=lambda item: int(item["amount"]))
             raw_rooms.append(
@@ -1198,9 +1360,18 @@ def scrape_1hotels_once(
         except TimeoutException:
             body_seen = False
 
-        # After the page body appears, wait briefly before reading prices.
-        # The page shell can render before the asynchronous rate component finishes,
-        # so scraping immediately can capture missing or incomplete prices.
+        # Wait for the booking app itself to hydrate. A successful <body> load is not
+        # enough; the failed long-date case shows an empty #root with only Chakra
+        # portal/select placeholders. Reload once if the root is stuck empty.
+        app_ready_initial = wait_for_booking_app_ready(driver, max_seconds=max(10.0, min(float(wait_seconds), 35.0)))
+        app_ready_result = reload_if_booking_root_is_empty(
+            driver=driver,
+            wait_seconds=wait_seconds,
+            app_ready_result=app_ready_initial,
+        )
+
+        # After the page body and app shell appear, wait briefly before reading prices.
+        # The rate rows are populated asynchronously after the cards render.
         price_settle_seconds = max(0.0, float(settle_seconds))
         time.sleep(price_settle_seconds)
 
@@ -1241,6 +1412,9 @@ def scrape_1hotels_once(
             "price_settle_seconds": price_settle_seconds,
             "price_poll_seconds": effective_price_poll_seconds,
             "minimum_price_poll_seconds": minimum_price_poll_seconds,
+            "app_ready_elapsed_seconds": app_ready_result.get("elapsed_seconds", 0),
+            "app_ready_last_state": app_ready_result.get("last_state", {}),
+            "reloaded_empty_root": app_ready_result.get("reloaded_empty_root", False),
             "poll_cycles": poll_result.get("cycles", 0),
             "seen_price_text": poll_result.get("seen_price_text", False),
             "contexts_scrolled": warmup_result.get("contexts_scrolled", 0),
@@ -1290,6 +1464,9 @@ def scrape_1hotels(
                     "price_settle_seconds": result.get("price_settle_seconds", 0),
                     "price_poll_seconds": result.get("price_poll_seconds", 0),
                     "minimum_price_poll_seconds": result.get("minimum_price_poll_seconds", 0),
+                    "app_ready_elapsed_seconds": result.get("app_ready_elapsed_seconds", 0),
+                    "reloaded_empty_root": result.get("reloaded_empty_root", False),
+                    "app_ready_last_state": result.get("app_ready_last_state", {}),
                     "poll_cycles": result.get("poll_cycles", 0),
                     "seen_price_text": result.get("seen_price_text", False),
                     "contexts_scrolled": result.get("contexts_scrolled", 0),
@@ -1625,9 +1802,9 @@ if search_clicked:
     is_long_date_search = room_nights_for_search > 3
 
     if is_long_date_search:
-        adaptive_wait_seconds = int(min(25, max(int(wait_seconds) + 5, 15)))
-        price_settle_seconds = 5.0
-        price_poll_seconds = 14.0
+        adaptive_wait_seconds = int(min(35, max(int(wait_seconds) + 12, 24)))
+        price_settle_seconds = 6.0
+        price_poll_seconds = 22.0
     else:
         adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
         price_settle_seconds = 3.0
