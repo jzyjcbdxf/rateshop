@@ -27,7 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-09 Starwood Hotel Rateshop robust-price-wait-v2"
+APP_VERSION = "2026-07-09 Starwood Hotel Rateshop iframe-shadow-price-parser"
 
 # ============================================================
 # Hotel map: dropdown label -> Starwood booking hotel code
@@ -584,86 +584,133 @@ def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
 
 
 def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
+    """Parse room prices from the current browsing context, including shadow DOM."""
     script = r"""
     const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i;
     const rows = [];
 
     function cleanText(value) {
       return (value || '').replace(/\s+/g, ' ').trim();
     }
 
+    function collectElements(root) {
+      const out = [];
+      const seen = new Set();
+
+      function walk(node) {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          out.push(node);
+          if (node.shadowRoot) walk(node.shadowRoot);
+        }
+
+        const children = node.children ? Array.from(node.children) : [];
+        for (const child of children) walk(child);
+      }
+
+      walk(root || document.body || document.documentElement);
+      return out;
+    }
+
+    const allElements = collectElements(document.body || document.documentElement);
+
     function isRoomLike(value) {
       const text = cleanText(value).toLowerCase();
-      return text.length >= 4 && text.length <= 90 &&
-        /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i.test(text);
+      return text.length >= 4 && text.length <= 90 && roomRegex.test(text);
+    }
+
+    function elementText(element) {
+      return cleanText(element ? (element.innerText || element.textContent || '') : '');
     }
 
     function findRoomTitle(card) {
-      const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]');
-      if (heading) {
-        const headingText = cleanText(heading.innerText || heading.textContent);
-        if (isRoomLike(headingText)) return headingText;
+      const cardElements = collectElements(card);
+      const headings = cardElements.filter(el => /^(H1|H2|H3|H4|H5|H6)$/i.test(el.tagName || '') || el.getAttribute('role') === 'heading');
+      for (const heading of headings) {
+        const headingText = elementText(heading);
+        if (isRoomLike(headingText) && !priceRegex.test(headingText)) return headingText;
       }
 
-      const candidates = Array.from(card.querySelectorAll('p,span,div,a,button'));
+      const candidates = cardElements.filter(el => /^(P|SPAN|DIV|A|BUTTON)$/i.test(el.tagName || ''));
       for (const node of candidates) {
-        const text = cleanText(node.innerText || node.textContent);
+        const text = elementText(node);
         if (isRoomLike(text) && !priceRegex.test(text)) return text;
       }
       return '';
     }
 
+    function addCard(cards, seen, card) {
+      if (!card || seen.has(card)) return;
+      const text = elementText(card);
+      if (!priceRegex.test(text)) return;
+      if (!roomRegex.test(text)) return;
+      if (text.length < 12 || text.length > 3500) return;
+      seen.add(card);
+      cards.push(card);
+    }
+
     function collectCandidateCards() {
-      const selectors = [
-        '[data-scope="carousel"][data-part="item"]',
-        '.chakra-card__root',
-        'article',
-        'section'
-      ];
       const cards = [];
       const seen = new Set();
 
-      for (const selector of selectors) {
-        for (const card of Array.from(document.querySelectorAll(selector))) {
-          if (seen.has(card)) continue;
-          const text = cleanText(card.innerText || card.textContent);
-          if (!priceRegex.test(text)) continue;
-          if (!/(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i.test(text)) continue;
-          seen.add(card);
-          cards.push(card);
+      const selectorMatches = [];
+      for (const selector of [
+        '[data-scope="carousel"][data-part="item"]',
+        '.chakra-card__root',
+        'article',
+        'section',
+        '[class*="room"]',
+        '[class*="rate"]',
+        '[data-testid*="room"]',
+        '[data-testid*="rate"]'
+      ]) {
+        try {
+          selectorMatches.push(...Array.from(document.querySelectorAll(selector)));
+        } catch (error) {}
+      }
+      for (const card of selectorMatches) addCard(cards, seen, card);
+
+      const titleNodes = allElements.filter(el => {
+        const text = elementText(el);
+        return isRoomLike(text) && !priceRegex.test(text);
+      });
+
+      for (const titleNode of titleNodes) {
+        let node = titleNode;
+        for (let depth = 0; node && depth < 9; depth += 1) {
+          const text = elementText(node);
+          if (priceRegex.test(text) && text.length <= 3500) {
+            addCard(cards, seen, node);
+            break;
+          }
+          node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
         }
       }
 
-      const titleNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]'));
-      for (const titleNode of titleNodes) {
-        const roomName = cleanText(titleNode.innerText || titleNode.textContent);
-        if (!isRoomLike(roomName)) continue;
-        let node = titleNode;
-        for (let depth = 0; node && depth < 7; depth += 1) {
-          const text = cleanText(node.innerText || node.textContent);
-          if (priceRegex.test(text)) {
-            if (!seen.has(node)) {
-              seen.add(node);
-              cards.push(node);
-            }
-            break;
-          }
-          node = node.parentElement;
-        }
+      // Last-resort cards: smallest elements that contain both a room-like word and a price.
+      for (const element of allElements) {
+        const text = elementText(element);
+        if (text.length < 20 || text.length > 1400) continue;
+        if (!priceRegex.test(text) || !roomRegex.test(text)) continue;
+        addCard(cards, seen, element);
       }
+
       return cards;
     }
 
     function parsePrices(card) {
-      const priceNodes = Array.from(card.querySelectorAll('p,span,div,label,button'));
+      const priceNodes = collectElements(card).filter(el => /^(P|SPAN|DIV|LABEL|BUTTON|A|LI)$/i.test(el.tagName || ''));
       const allPrices = [];
       const preferredPrices = [];
 
       for (const node of priceNodes) {
-        const text = cleanText(node.innerText || node.textContent);
+        const text = elementText(node);
         const match = text.match(priceRegex);
         if (!match) continue;
-        if (/amenity|fee|tax|total|include|included|resort|destination/i.test(text)) continue;
+        if (/amenity|fee|tax|total|include|included|resort|destination|deposit|due now/i.test(text)) continue;
 
         const symbol = match[1] || '$';
         const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
@@ -671,8 +718,8 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
 
         const item = {value, symbol};
         allPrices.push(item);
-        const tagName = node.tagName.toLowerCase();
-        if (tagName === 'p' || /per night|night|avg|from/i.test(text)) {
+        const tagName = (node.tagName || '').toLowerCase();
+        if (tagName === 'p' || /per night|night|avg|average|from|rate/i.test(text)) {
           preferredPrices.push(item);
         }
       }
@@ -703,6 +750,160 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     except Exception:
         return []
     return rows if isinstance(rows, list) else []
+
+
+def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
+    """Return True if the current document or any open shadow root contains a price-looking string."""
+    script = r"""
+    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    function collectText(root) {
+      let text = '';
+      const seen = new Set();
+      function walk(node) {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        if (node.nodeType === Node.TEXT_NODE) {
+          text += ' ' + (node.nodeValue || '');
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+        if (node.shadowRoot) walk(node.shadowRoot);
+        const children = node.childNodes ? Array.from(node.childNodes) : [];
+        for (const child of children) walk(child);
+      }
+      walk(root || document.body || document.documentElement);
+      return text;
+    }
+    return priceRegex.test(collectText(document.body || document.documentElement));
+    """
+    try:
+        return bool(driver.execute_script(script))
+    except Exception:
+        return False
+
+
+def count_current_context_iframes(driver: webdriver.Chrome) -> int:
+    try:
+        return len(driver.find_elements(By.CSS_SELECTOR, "iframe"))
+    except Exception:
+        return 0
+
+
+def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth: int = 4) -> Dict[str, object]:
+    """
+    Parse prices from the top document and nested iframes.
+
+    1 Hotels booking uses the Selfbook script. In headless Chrome the top page can
+    look loaded while the actual rate UI is inside an iframe or an open shadow DOM.
+    Scraping only the default document can therefore produce body_seen=True but
+    seen_price_text=False.
+    """
+    raw_rooms: List[Dict] = []
+    contexts_checked = 0
+    iframe_count = 0
+    frame_errors: List[str] = []
+    seen_price_text = False
+
+    def visit(depth: int) -> None:
+        nonlocal contexts_checked, iframe_count, seen_price_text
+        contexts_checked += 1
+
+        try:
+            if current_context_has_price_text(driver):
+                seen_price_text = True
+        except Exception:
+            pass
+
+        try:
+            raw_rooms.extend(parse_rooms_with_browser_dom(driver))
+        except Exception as exc:
+            frame_errors.append(f"parse depth {depth}: {exc}")
+
+        if depth >= max_depth:
+            return
+
+        try:
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        except Exception as exc:
+            frame_errors.append(f"iframe lookup depth {depth}: {exc}")
+            return
+
+        iframe_count += len(frames)
+        for index in range(len(frames)):
+            try:
+                frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+                driver.switch_to.frame(frames[index])
+                visit(depth + 1)
+                driver.switch_to.parent_frame()
+            except Exception as exc:
+                frame_errors.append(f"iframe depth {depth} index {index}: {exc}")
+                try:
+                    driver.switch_to.parent_frame()
+                except Exception:
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    visit(0)
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    return {
+        "raw_rooms": raw_rooms,
+        "rooms": dedupe_rooms(raw_rooms),
+        "contexts_checked": contexts_checked,
+        "iframe_count": iframe_count,
+        "frame_errors": frame_errors[:8],
+        "seen_price_text": seen_price_text,
+    }
+
+
+def collect_page_sources_from_all_contexts(driver: webdriver.Chrome, max_depth: int = 3) -> List[str]:
+    sources: List[str] = []
+
+    def visit(depth: int) -> None:
+        try:
+            sources.append(driver.page_source)
+        except Exception:
+            pass
+        if depth >= max_depth:
+            return
+        try:
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        except Exception:
+            return
+        for index in range(len(frames)):
+            try:
+                frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+                driver.switch_to.frame(frames[index])
+                visit(depth + 1)
+                driver.switch_to.parent_frame()
+            except Exception:
+                try:
+                    driver.switch_to.parent_frame()
+                except Exception:
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    visit(0)
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    return sources
 
 def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
     soup = BeautifulSoup(html_source, "html.parser")
@@ -783,6 +984,53 @@ def warm_up_lazy_loaded_rates(driver: webdriver.Chrome) -> None:
         pass
 
 
+def warm_up_lazy_loaded_rates_all_contexts(driver: webdriver.Chrome, max_depth: int = 3) -> Dict[str, object]:
+    """Scroll the top document and iframes to trigger lazy-loaded room/rate cards."""
+    contexts_scrolled = 0
+    frame_errors: List[str] = []
+
+    def visit(depth: int) -> None:
+        nonlocal contexts_scrolled
+        contexts_scrolled += 1
+        warm_up_lazy_loaded_rates(driver)
+
+        if depth >= max_depth:
+            return
+        try:
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        except Exception as exc:
+            frame_errors.append(f"iframe lookup depth {depth}: {exc}")
+            return
+
+        for index in range(len(frames)):
+            try:
+                frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+                driver.switch_to.frame(frames[index])
+                visit(depth + 1)
+                driver.switch_to.parent_frame()
+            except Exception as exc:
+                frame_errors.append(f"iframe scroll depth {depth} index {index}: {exc}")
+                try:
+                    driver.switch_to.parent_frame()
+                except Exception:
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    visit(0)
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    return {"contexts_scrolled": contexts_scrolled, "frame_errors": frame_errors[:8]}
+
+
 def room_fingerprint(rooms: List[Dict]) -> str:
     parts = []
     for room in rooms:
@@ -796,12 +1044,8 @@ def poll_rooms_after_page_open(
     min_seconds: float = 6.0,
 ) -> Dict[str, object]:
     """
-    Poll the already-open booking page for live prices.
-
-    This deliberately does not stop after the first stable-looking result. On this
-    booking page, the first one or two room cards can appear before the rest of the
-    rates finish rendering, especially after lazy scrolling. The loop keeps polling
-    for at least min_seconds and only exits after several unchanged cycles.
+    Poll the already-open booking page for live prices across top document,
+    shadow DOM, and nested iframes.
     """
     start_time = time.monotonic()
     best_raw_rooms: List[Dict] = []
@@ -810,21 +1054,31 @@ def poll_rooms_after_page_open(
     stable_cycles = 0
     cycles = 0
     seen_price_text = False
+    max_contexts_checked = 0
+    max_iframe_count = 0
+    frame_errors: List[str] = []
 
     max_seconds = max(3.0, float(max_seconds))
     min_seconds = min(max(1.0, float(min_seconds)), max_seconds)
 
     while time.monotonic() - start_time <= max_seconds:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
         scroll_booking_page_once(driver, cycles)
         time.sleep(0.55)
 
-        raw_rooms = parse_rooms_with_browser_dom(driver)
+        context_result = collect_rooms_from_all_browser_contexts(driver)
+        raw_rooms = list(context_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
         fingerprint = room_fingerprint(rooms)
         cycles += 1
 
-        if rooms:
-            seen_price_text = True
+        seen_price_text = seen_price_text or bool(context_result.get("seen_price_text", False)) or bool(rooms)
+        max_contexts_checked = max(max_contexts_checked, int(context_result.get("contexts_checked", 0) or 0))
+        max_iframe_count = max(max_iframe_count, int(context_result.get("iframe_count", 0) or 0))
+        frame_errors.extend(str(x) for x in context_result.get("frame_errors", []) if x)
 
         if len(rooms) > len(best_rooms) or (len(rooms) == len(best_rooms) and fingerprint and fingerprint != best_fingerprint):
             best_raw_rooms = raw_rooms
@@ -841,6 +1095,7 @@ def poll_rooms_after_page_open(
             break
 
     try:
+        driver.switch_to.default_content()
         driver.execute_script("window.scrollTo(0, 0);")
     except Exception:
         pass
@@ -850,6 +1105,9 @@ def poll_rooms_after_page_open(
         "rooms": best_rooms,
         "cycles": cycles,
         "seen_price_text": seen_price_text,
+        "contexts_checked": max_contexts_checked,
+        "iframe_count": max_iframe_count,
+        "frame_errors": frame_errors[:8],
         "elapsed_seconds": round(time.monotonic() - start_time, 2),
     }
 
@@ -893,7 +1151,7 @@ def scrape_1hotels_once(
 
         # Trigger lazy-loaded room cards before parsing. Without this, headless Chrome
         # can see the page shell but miss prices that render only after scrolling.
-        warm_up_lazy_loaded_rates(driver)
+        warmup_result = warm_up_lazy_loaded_rates_all_contexts(driver)
 
         # Main mode uses the configured price polling window. Fallback gets a small
         # extra buffer because it only runs after primary returns no prices or fails.
@@ -930,6 +1188,10 @@ def scrape_1hotels_once(
             "minimum_price_poll_seconds": minimum_price_poll_seconds,
             "poll_cycles": poll_result.get("cycles", 0),
             "seen_price_text": poll_result.get("seen_price_text", False),
+            "contexts_scrolled": warmup_result.get("contexts_scrolled", 0),
+            "contexts_checked": poll_result.get("contexts_checked", 0),
+            "iframe_count": poll_result.get("iframe_count", 0),
+            "frame_errors": list(warmup_result.get("frame_errors", [])) + list(poll_result.get("frame_errors", [])),
             "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
@@ -975,6 +1237,10 @@ def scrape_1hotels(
                     "minimum_price_poll_seconds": result.get("minimum_price_poll_seconds", 0),
                     "poll_cycles": result.get("poll_cycles", 0),
                     "seen_price_text": result.get("seen_price_text", False),
+                    "contexts_scrolled": result.get("contexts_scrolled", 0),
+                    "contexts_checked": result.get("contexts_checked", 0),
+                    "iframe_count": result.get("iframe_count", 0),
+                    "frame_errors": result.get("frame_errors", []),
                     "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
                     "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
                 }
