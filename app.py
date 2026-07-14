@@ -27,32 +27,46 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-09 Starwood Hotel Rateshop strict-card-parser-app-ready-reload"
+APP_VERSION = "2026-07-14 Starwood Hotel Rateshop BAC-provider-routing"
 
 # ============================================================
-# Hotel map: dropdown label -> Starwood booking hotel code
+# Hotel map: dropdown label -> booking-provider configuration
+#
+# provider="1hotels":
+#   https://www.1hotels.com/book/{hotel_code}?...
+#
+# provider="baccarat":
+#   https://www.baccarathotels.com/book?hotelCode={hotel_code}&...
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, Dict[str, str]] = {
-    "1SB": {"code": "60507", "currency_symbol": "$"},
-    "1CP": {"code": "60735", "currency_symbol": "$"},
-    "1BB": {"code": "66266", "currency_symbol": "$"},
-    "1TY": {"code": "96185", "currency_symbol": "¥"},
-    "1ML": {"code": "47157", "currency_symbol": "$"},
-    "1MF": {"code": "40333", "currency_symbol": "£"},
-    "1HNB": {"code": "5826", "currency_symbol": "$"},
-    "1CPH": {"code": "41069", "currency_symbol": "kr."},
-    "1NV": {"code": "35903", "currency_symbol": "$"},
-    "1SF": {"code": "36017", "currency_symbol": "$"},
-    "1SE": {"code": "47314", "currency_symbol": "$"},
-    "1TO": {"code": "31116", "currency_symbol": "$"},
-    "1WH": {"code": "77961", "currency_symbol": "$"},
+    "1SB": {"code": "60507", "currency_symbol": "$", "provider": "1hotels"},
+    "1CP": {"code": "60735", "currency_symbol": "$", "provider": "1hotels"},
+    "1BB": {"code": "66266", "currency_symbol": "$", "provider": "1hotels"},
+    "1TY": {"code": "96185", "currency_symbol": "¥", "provider": "1hotels"},
+    "1ML": {"code": "47157", "currency_symbol": "$", "provider": "1hotels"},
+    "1MF": {"code": "40333", "currency_symbol": "£", "provider": "1hotels"},
+    "1HNB": {"code": "5826", "currency_symbol": "$", "provider": "1hotels"},
+    "1CPH": {"code": "41069", "currency_symbol": "kr.", "provider": "1hotels"},
+    "1NV": {"code": "35903", "currency_symbol": "$", "provider": "1hotels"},
+    "1SF": {"code": "36017", "currency_symbol": "$", "provider": "1hotels"},
+    "1SE": {"code": "47314", "currency_symbol": "$", "provider": "1hotels"},
+    "1TO": {"code": "31116", "currency_symbol": "$", "provider": "1hotels"},
+    "1WH": {"code": "77961", "currency_symbol": "$", "provider": "1hotels"},
+    "BAC": {
+        "code": "62963",
+        "currency_symbol": "$",
+        "provider": "baccarat",
+        "hotel_provider": "1",
+        "client_id": "baccarat",
+    },
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
 DEFAULT_CHECKIN = date.today()
 DEFAULT_CHECKOUT = date.today() + timedelta(days=1)
 DEFAULT_DISCOUNT_PERCENT = 10
-BASE_BOOKING_URL = "https://www.1hotels.com/book/{hotel_code}"
+ONE_HOTELS_BOOKING_URL = "https://www.1hotels.com/book/{hotel_code}"
+BACCARAT_BOOKING_URL = "https://www.baccarathotels.com/book"
 
 # Keywords used only as a room-name filter.
 # The scraper scans h1/h2/h3/h4 titles and keeps titles that look like room names.
@@ -295,12 +309,23 @@ consume_browser_template_from_query_params()
 # ============================================================
 # Hotel config helpers
 # ============================================================
+def get_hotel_config(hotel_key: str) -> Dict[str, str]:
+    """Return a copy of the selected hotel's booking configuration."""
+    if hotel_key not in HOTEL_CODE_MAP:
+        raise KeyError(f"Unknown hotel key: {hotel_key}")
+    return dict(HOTEL_CODE_MAP[hotel_key])
+
+
 def get_hotel_code(hotel_key: str) -> str:
-    return str(HOTEL_CODE_MAP[hotel_key]["code"])
+    return str(get_hotel_config(hotel_key)["code"])
+
+
+def get_hotel_provider(hotel_key: str) -> str:
+    return str(get_hotel_config(hotel_key).get("provider") or "1hotels")
 
 
 def get_hotel_currency_symbol(hotel_key: str) -> str:
-    return str(HOTEL_CODE_MAP[hotel_key].get("currency_symbol") or "$")
+    return str(get_hotel_config(hotel_key).get("currency_symbol") or "$")
 
 
 def apply_hotel_currency_symbol(rooms: List[Dict], hotel_key: str) -> List[Dict]:
@@ -318,7 +343,7 @@ def apply_hotel_currency_symbol(rooms: List[Dict], hotel_key: str) -> List[Dict]
 # URL builder
 # ============================================================
 def build_booking_url(
-    hotel_code: str,
+    hotel_key: str,
     checkin: date,
     checkout: date,
     adults: int = 1,
@@ -331,6 +356,31 @@ def build_booking_url(
     promo_code: str = "",
     sort: str = "low",
 ) -> str:
+    """Build the correct booking URL for the selected hotel/provider."""
+    hotel_config = get_hotel_config(hotel_key)
+    hotel_code = str(hotel_config["code"])
+    provider = str(hotel_config.get("provider") or "1hotels").lower()
+
+    if provider == "baccarat":
+        # Baccarat uses the same booking-page UI/CSS, but its query-string contract
+        # differs from 1 Hotels. Keep these parameter names aligned with the live
+        # Baccarat booking link supplied for BAC hotel code 62963.
+        params = {
+            "currency": currency,
+            "endDate": checkout.isoformat(),
+            "exactMatchOnly": "false",
+            "hotelCode": hotel_code,
+            "hotelProvider": str(hotel_config.get("hotel_provider") or "1"),
+            "numRooms": 1,
+            "primaryLangId": language,
+            "startDate": checkin.isoformat(),
+            "adults": adults,
+            "children": children,
+            "clientId": str(hotel_config.get("client_id") or "baccarat"),
+            "theme": "null",
+        }
+        return f"{BACCARAT_BOOKING_URL}?{urlencode(params)}"
+
     params = {
         "startDate": checkin.isoformat(),
         "endDate": checkout.isoformat(),
@@ -346,7 +396,7 @@ def build_booking_url(
         "promoCode": promo_code,
         "sort": sort,
     }
-    return f"{BASE_BOOKING_URL.format(hotel_code=hotel_code)}?{urlencode(params)}"
+    return f"{ONE_HOTELS_BOOKING_URL.format(hotel_code=hotel_code)}?{urlencode(params)}"
 
 
 # ============================================================
@@ -1815,8 +1865,10 @@ with st.sidebar:
         index=list(HOTEL_CODE_MAP.keys()).index(DEFAULT_HOTEL_KEY),
     )
     hotel_code = get_hotel_code(hotel_key)
+    hotel_provider = get_hotel_provider(hotel_key)
     selected_currency_symbol = get_hotel_currency_symbol(hotel_key)
     st.text_input("Hotel code", value=hotel_code, disabled=True)
+    st.text_input("Booking provider", value=hotel_provider, disabled=True)
     st.text_input("Currency symbol", value=selected_currency_symbol, disabled=True)
 
     checkin = st.date_input("Check-in / startDate", value=DEFAULT_CHECKIN)
@@ -1853,7 +1905,7 @@ if checkout <= checkin:
 
 
 target_url = build_booking_url(
-    hotel_code=hotel_code,
+    hotel_key=hotel_key,
     checkin=checkin,
     checkout=checkout,
     adults=int(adults),
