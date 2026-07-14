@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import html
 import json
 import math
@@ -27,7 +30,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-14 Starwood Hotel Rateshop BAC-provider-routing"
+APP_VERSION = "2026-07-14 Starwood Hotel Rateshop BAC-persistent-login-v2"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -136,10 +139,19 @@ st.markdown(
 
 
 # ============================================================
-# Authentication
+# Browser-local cache and authentication
+#
 # Streamlit Cloud -> App settings -> Secrets:
-# user_name = 123
-# password = 456
+# user_name = "123"
+# password = "456"
+#
+# Optional, strongly recommended:
+# auth_token_secret = "a-long-random-secret-that-is-different-from-the-password"
+# remember_login_days = 365
+#
+# The browser never stores the plaintext username/password. After a successful
+# login, it stores only a signed, expiring token in localStorage. Changing the
+# configured password or auth_token_secret immediately invalidates old tokens.
 # ============================================================
 def get_secret_value(key: str, default: str = "") -> str:
     try:
@@ -149,50 +161,17 @@ def get_secret_value(key: str, default: str = "") -> str:
     return str(value)
 
 
-def login_required() -> None:
-    expected_user_name = get_secret_value("user_name")
-    expected_password = get_secret_value("password")
-
-    if not expected_user_name or not expected_password:
-        st.error(
-            "Please configure the login credentials in Streamlit Secrets first:\n\n"
-            "user_name = 123\n"
-            "password = 456"
-        )
-        st.stop()
-
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-
-    if st.session_state.authenticated:
-        return
-
-    st.title("🔐 Starwood Hotel Rateshop Login")
-    with st.form("login_form", clear_on_submit=False):
-        user_name = st.text_input("User Name")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("LOGIN", type="primary")
-
-    if submitted:
-        if user_name == expected_user_name and password == expected_password:
-            st.session_state.authenticated = True
-            st.session_state.authenticated_user_name = user_name
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
-
-    st.stop()
+def get_query_param_value(key: str, default: str = "") -> str:
+    """Return one query parameter value as a string across Streamlit versions."""
+    try:
+        value = st.query_params.get(key, default)
+    except Exception:
+        return default
+    if isinstance(value, list):
+        return str(value[0]) if value else default
+    return str(value) if value is not None else default
 
 
-login_required()
-
-
-# ============================================================
-# Browser-local user preference cache
-# Email templates are intentionally stored in each user's browser localStorage,
-# not in Streamlit server cache. This prevents one logged-in user from
-# overriding another user's Email Opening / Email Ending template.
-# ============================================================
 def default_ending_text() -> str:
     valid_until = date.today() + timedelta(days=3)
     return (
@@ -203,42 +182,144 @@ def default_ending_text() -> str:
 
 
 def get_browser_storage_namespace() -> str:
-    """Return the browser-local namespace used for this app's saved preferences."""
+    """Return the browser-local namespace used for saved email preferences."""
     return "starwood_rateshop_email_template_v1"
 
 
-def render_local_storage_loader() -> None:
-    """
-    Load browser localStorage into temporary URL query params once per browser tab.
+def get_auth_storage_namespace() -> str:
+    """Return the browser-local key used for the persistent login token."""
+    return "starwood_rateshop_auth_v1"
 
-    Streamlit Python cannot directly read browser localStorage. This small JS
-    bridge reads localStorage, writes temporary query params, and reloads once.
-    Python then consumes the query params into st.session_state.
+
+def get_remember_login_days() -> int:
+    """Return the persistent login lifetime, constrained to a safe range."""
+    raw_value = get_secret_value("remember_login_days", "365")
+    try:
+        days = int(raw_value)
+    except (TypeError, ValueError):
+        days = 365
+    return max(1, min(days, 3650))
+
+
+def get_auth_signing_secret(expected_user_name: str, expected_password: str) -> bytes:
     """
-    namespace = get_browser_storage_namespace()
+    Return the token signing secret.
+
+    An explicit auth_token_secret is preferred. If it is not configured, derive
+    a stable signing key from the configured login credentials, so changing the
+    password invalidates all previously remembered logins.
+    """
+    configured_secret = get_secret_value("auth_token_secret", "").strip()
+    token_secret = configured_secret or "starwood-rateshop-auth-v1-default-signing-salt"
+    source = f"{token_secret}\0{expected_user_name}\0{expected_password}"
+    return hashlib.sha256(source.encode("utf-8")).digest()
+
+
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def create_auth_token(user_name: str, expected_password: str) -> str:
+    """Create a signed browser token without storing the plaintext password."""
+    now = int(time.time())
+    payload = {
+        "version": 1,
+        "user_name": user_name,
+        "issued_at": now,
+        "expires_at": now + get_remember_login_days() * 24 * 60 * 60,
+    }
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload_part = base64url_encode(payload_bytes)
+    signature = hmac.new(
+        get_auth_signing_secret(user_name, expected_password),
+        payload_part.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{payload_part}.{base64url_encode(signature)}"
+
+
+def validate_auth_token(token: str, expected_user_name: str, expected_password: str) -> Optional[Dict[str, object]]:
+    """Validate token signature, username, version, and expiration."""
+    if not token or "." not in token:
+        return None
+
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        supplied_signature = base64url_decode(signature_part)
+        expected_signature = hmac.new(
+            get_auth_signing_secret(expected_user_name, expected_password),
+            payload_part.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            return None
+
+        payload = json.loads(base64url_decode(payload_part).decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        if int(payload.get("version", 0) or 0) != 1:
+            return None
+        if str(payload.get("user_name", "")) != expected_user_name:
+            return None
+
+        now = int(time.time())
+        issued_at = int(payload.get("issued_at", 0) or 0)
+        expires_at = int(payload.get("expires_at", 0) or 0)
+        if issued_at <= 0 or issued_at > now + 300:
+            return None
+        if expires_at <= now:
+            return None
+        if expires_at - issued_at > 3650 * 24 * 60 * 60:
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def render_browser_storage_loader() -> None:
+    """
+    Load both persistent authentication and email preferences before login.
+
+    The old version loaded email preferences only after login and then forced a
+    full browser reload. That reload created a new Streamlit session and erased
+    the just-written authenticated session_state, which is why the first login
+    appeared to flash and required a second password entry.
+    """
+    template_namespace = get_browser_storage_namespace()
+    auth_namespace = get_auth_storage_namespace()
 
     components.html(
         f"""
         <script>
-        const namespace = {json.dumps(namespace)};
-        const openingKey = namespace + "_email_opening";
-        const endingKey = namespace + "_email_ending";
-        const taxKey = namespace + "_rates_include_tax";
-
+        const templateNamespace = {json.dumps(template_namespace)};
+        const authKey = {json.dumps(auth_namespace)};
         const parentWindow = window.parent;
         const params = new URLSearchParams(parentWindow.location.search);
 
-        if (!params.has("browser_template_loaded")) {{
-            const opening = parentWindow.localStorage.getItem(openingKey) || "";
-            const ending = parentWindow.localStorage.getItem(endingKey) || "";
-            const tax = parentWindow.localStorage.getItem(taxKey) || "";
+        if (!params.has("browser_storage_loaded")) {{
+            const opening = parentWindow.localStorage.getItem(templateNamespace + "_email_opening") || "";
+            const ending = parentWindow.localStorage.getItem(templateNamespace + "_email_ending") || "";
+            const tax = parentWindow.localStorage.getItem(templateNamespace + "_rates_include_tax") || "";
+            const authToken = parentWindow.localStorage.getItem(authKey) || "";
 
+            params.set("browser_storage_loaded", "1");
             params.set("browser_template_loaded", "1");
             params.set("browser_email_opening", opening);
             params.set("browser_email_ending", ending);
             params.set("browser_rates_include_tax", tax);
+            if (authToken) {{
+                params.set("browser_auth_token", authToken);
+            }} else {{
+                params.delete("browser_auth_token");
+            }}
 
-            const newUrl = parentWindow.location.pathname + "?" + params.toString();
+            const query = params.toString();
+            const newUrl = parentWindow.location.pathname + (query ? "?" + query : "") + parentWindow.location.hash;
             parentWindow.history.replaceState(null, "", newUrl);
             parentWindow.location.reload();
         }}
@@ -248,31 +329,100 @@ def render_local_storage_loader() -> None:
     )
 
 
-def consume_browser_template_from_query_params() -> None:
-    """Move browser-loaded template values from query params into session_state."""
-    params = st.query_params
-
-    if "browser_template_consumed" in st.session_state:
-        return
-
-    # Wait until the JavaScript loader has copied browser localStorage into
-    # query params. This prevents Streamlit from rendering text_area widgets
-    # with default values before browser values arrive.
-    if params.get("browser_template_loaded", "") != "1":
+def consume_browser_storage_from_query_params() -> None:
+    """Initialize browser-backed preferences exactly once in the Streamlit session."""
+    if get_query_param_value("browser_storage_loaded") != "1":
         st.stop()
 
-    browser_opening = params.get("browser_email_opening", "")
-    browser_ending = params.get("browser_email_ending", "")
-    browser_tax = params.get("browser_rates_include_tax", "")
+    if "browser_template_consumed" not in st.session_state:
+        browser_opening = get_query_param_value("browser_email_opening")
+        browser_ending = get_query_param_value("browser_email_ending")
+        browser_tax = get_query_param_value("browser_rates_include_tax")
 
-    st.session_state.email_opening = browser_opening or ""
-    st.session_state.email_ending = browser_ending or default_ending_text()
-    st.session_state.rates_include_tax = str(browser_tax).lower() == "true"
-    st.session_state.browser_template_consumed = True
+        st.session_state.email_opening = browser_opening or ""
+        st.session_state.email_ending = browser_ending or default_ending_text()
+        st.session_state.rates_include_tax = browser_tax.lower() == "true"
+        st.session_state.browser_template_consumed = True
+
+
+def render_auth_token_saver_and_reload(token: str) -> None:
+    """Persist the signed token, put it in the URL bridge, and reload once."""
+    auth_namespace = get_auth_storage_namespace()
+    components.html(
+        f"""
+        <script>
+        const parentWindow = window.parent;
+        const authKey = {json.dumps(auth_namespace)};
+        const token = {json.dumps(token)};
+        const params = new URLSearchParams(parentWindow.location.search);
+
+        parentWindow.localStorage.setItem(authKey, token);
+        params.set("browser_storage_loaded", "1");
+        params.set("browser_auth_token", token);
+
+        const query = params.toString();
+        const newUrl = parentWindow.location.pathname + (query ? "?" + query : "") + parentWindow.location.hash;
+        parentWindow.history.replaceState(null, "", newUrl);
+        window.setTimeout(function() {{ parentWindow.location.reload(); }}, 80);
+        </script>
+        <div style="
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid #d8ead8;
+            background: #f3fbf3;
+            color: #1d5f1d;
+            font-weight: 700;
+            font-family: sans-serif;
+        ">
+            Login successful. Saving this browser as trusted...
+        </div>
+        """,
+        height=54,
+    )
+
+
+def render_invalid_auth_token_clearer() -> None:
+    """Delete an invalid/expired token without forcing another page reload."""
+    auth_namespace = get_auth_storage_namespace()
+    components.html(
+        f"""
+        <script>
+        const parentWindow = window.parent;
+        const params = new URLSearchParams(parentWindow.location.search);
+        parentWindow.localStorage.removeItem({json.dumps(auth_namespace)});
+        params.delete("browser_auth_token");
+        const query = params.toString();
+        const newUrl = parentWindow.location.pathname + (query ? "?" + query : "") + parentWindow.location.hash;
+        parentWindow.history.replaceState(null, "", newUrl);
+        </script>
+        """,
+        height=0,
+    )
+
+
+def render_logout_and_reload() -> None:
+    """Clear the remembered login from this browser and reload to the login form."""
+    auth_namespace = get_auth_storage_namespace()
+    components.html(
+        f"""
+        <script>
+        const parentWindow = window.parent;
+        const params = new URLSearchParams(parentWindow.location.search);
+        parentWindow.localStorage.removeItem({json.dumps(auth_namespace)});
+        params.delete("browser_auth_token");
+        params.set("browser_storage_loaded", "1");
+        const query = params.toString();
+        const newUrl = parentWindow.location.pathname + (query ? "?" + query : "") + parentWindow.location.hash;
+        parentWindow.history.replaceState(null, "", newUrl);
+        window.setTimeout(function() {{ parentWindow.location.reload(); }}, 80);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def render_local_storage_saver(opening: str, ending: str, rates_include_tax: bool) -> None:
-    """Save the current template into this browser's localStorage only."""
+    """Save the current email template into this browser's localStorage only."""
     namespace = get_browser_storage_namespace()
 
     components.html(
@@ -300,10 +450,63 @@ def render_local_storage_saver(opening: str, ending: str, rates_include_tax: boo
     )
 
 
+def login_required() -> None:
+    expected_user_name = get_secret_value("user_name")
+    expected_password = get_secret_value("password")
+
+    if not expected_user_name or not expected_password:
+        st.error(
+            "Please configure the login credentials in Streamlit Secrets first:\n\n"
+            'user_name = "123"\n'
+            'password = "456"'
+        )
+        st.stop()
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return
+
+    browser_token = get_query_param_value("browser_auth_token")
+    token_payload = validate_auth_token(browser_token, expected_user_name, expected_password)
+    if token_payload is not None:
+        st.session_state.authenticated = True
+        st.session_state.authenticated_user_name = expected_user_name
+        st.session_state.authenticated_via_browser_token = True
+        return
+
+    if browser_token:
+        render_invalid_auth_token_clearer()
+
+    st.title("🔐 Starwood Hotel Rateshop Login")
+    st.caption(
+        f"A successful login will be remembered in this browser for up to "
+        f"{get_remember_login_days()} day(s). No plaintext password is stored."
+    )
+
+    with st.form("login_form", clear_on_submit=False):
+        user_name = st.text_input("User Name")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("LOGIN", type="primary")
+
+    if submitted:
+        user_ok = hmac.compare_digest(str(user_name), expected_user_name)
+        password_ok = hmac.compare_digest(str(password), expected_password)
+        if user_ok and password_ok:
+            token = create_auth_token(expected_user_name, expected_password)
+            render_auth_token_saver_and_reload(token)
+        else:
+            st.error("Invalid username or password.")
+
+    st.stop()
 
 
-render_local_storage_loader()
-consume_browser_template_from_query_params()
+# Load browser state before authentication. This ordering prevents the email
+# template localStorage bridge from destroying a newly authenticated session.
+render_browser_storage_loader()
+consume_browser_storage_from_query_params()
+login_required()
 
 
 # ============================================================
@@ -1857,7 +2060,9 @@ with st.sidebar:
     if st.button("LOGOUT"):
         st.session_state.authenticated = False
         st.session_state.pop("authenticated_user_name", None)
-        st.rerun()
+        st.session_state.pop("authenticated_via_browser_token", None)
+        render_logout_and_reload()
+        st.stop()
 
     hotel_key = st.selectbox(
         "Hotel dropdown menu",
