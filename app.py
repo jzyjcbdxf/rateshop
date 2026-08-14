@@ -117,598 +117,451 @@ PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
-STREAMLIT_ENTERPRISE_CSS = """
+STREAMLIT_SAGE_CSS = """
 <style>
 :root {
-    color-scheme: light;
-    --rs-canvas: #E7ECE9;
-    --rs-canvas-2: #E2E9E5;
-    --rs-sidebar: #EEF2EF;
-    --rs-panel: #F4F7F5;
-    --rs-panel-strong: #F8FAF8;
-    --rs-panel-muted: #EAF0EC;
-    --rs-control: #F2F5F3;
-    --rs-control-hover: #E5ECE8;
-    --rs-line: #C9D5CE;
-    --rs-line-soft: #D9E2DD;
-    --rs-ink: #173229;
-    --rs-ink-2: #3F574C;
-    --rs-ink-3: #718278;
-    --rs-accent: #2F6F53;
-    --rs-accent-deep: #24533F;
-    --rs-accent-soft: #DCE9E1;
-    --rs-accent-softer: #E7F0EA;
-    --rs-success: #2F7454;
-    --rs-warning: #956728;
-    --rs-danger: #A74E5F;
-    --rs-shadow: 0 18px 48px rgba(31, 63, 49, .10);
-    --rs-shadow-soft: 0 8px 24px rgba(31, 63, 49, .065);
+    --rs-bg: #E6ECE8;
+    --rs-surface: #F3F6F4;
+    --rs-surface-2: #EDF2EE;
+    --rs-surface-3: #E3EBE6;
+    --rs-hover: #DCE8E0;
+    --rs-border: rgba(50, 91, 72, .14);
+    --rs-border-strong: rgba(50, 91, 72, .26);
+    --rs-text: #18352B;
+    --rs-muted: #63796F;
+    --rs-faint: #879A91;
+    --rs-primary: #2D7B57;
+    --rs-primary-hover: #236445;
+    --rs-primary-soft: rgba(45, 123, 87, .11);
+    --rs-success: #2F8F61;
+    --rs-warning: #B87927;
+    --rs-danger: #C55266;
+    --rs-shadow: 0 18px 50px rgba(37, 76, 58, .12);
+    --rs-shadow-soft: 0 8px 26px rgba(37, 76, 58, .08);
     --rs-radius-sm: 9px;
     --rs-radius: 13px;
     --rs-radius-lg: 18px;
     --rs-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+html, body, [class*="css"] {
     font-family: var(--rs-font) !important;
-    color-scheme: light !important;
-    color: var(--rs-ink) !important;
-    background: var(--rs-canvas) !important;
 }
 
-html, body { overflow-x: hidden !important; }
-[data-testid="stMain"] { min-width: 0 !important; overflow-x: hidden !important; }
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+    color-scheme: light !important;
+    background:
+        radial-gradient(circle at 16% -8%, rgba(101, 187, 139, .17), transparent 31%),
+        radial-gradient(circle at 94% 0%, rgba(184, 222, 199, .23), transparent 28%),
+        var(--rs-bg) !important;
+    color: var(--rs-text) !important;
+}
 
 header[data-testid="stHeader"] {
-    background: rgba(231, 236, 233, .93) !important;
-    border-bottom: 1px solid rgba(60, 87, 74, .08) !important;
-    backdrop-filter: blur(12px);
+    background: rgba(230, 236, 232, .82) !important;
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(50, 91, 72, .06);
 }
-[data-testid="stToolbar"], [data-testid="stDecoration"] { color: var(--rs-ink-2) !important; }
+
+[data-testid="stToolbar"], [data-testid="stDecoration"] {
+    color: var(--rs-muted) !important;
+}
 
 .stMainBlockContainer,
 section.main > div.block-container {
-    width: 100% !important;
-    max-width: 1280px !important;
-    min-width: 0 !important;
-    margin: 0 auto !important;
-    padding: 1.35rem 1.65rem 4rem !important;
-    box-sizing: border-box !important;
+    max-width: 1540px !important;
+    padding-top: 1.35rem !important;
+    padding-bottom: 4rem !important;
 }
 
-/* ---------- Typography ---------- */
+/* Main typography */
 h1, h2, h3, h4, h5, h6,
 [data-testid="stMarkdownContainer"] h1,
 [data-testid="stMarkdownContainer"] h2,
-[data-testid="stMarkdownContainer"] h3,
-[data-testid="stHeadingWithActionElements"] {
-    color: var(--rs-ink) !important;
-    letter-spacing: -.025em !important;
+[data-testid="stMarkdownContainer"] h3 {
+    color: var(--rs-text) !important;
+    letter-spacing: -.025em;
 }
-[data-testid="stCaptionContainer"], .stCaption, small { color: var(--rs-ink-3) !important; }
-[data-testid="stMarkdownContainer"] p { color: var(--rs-ink-2); }
-a { color: var(--rs-accent) !important; }
-a:hover { color: var(--rs-accent-deep) !important; }
 
-/* ---------- Enterprise header ---------- */
+p, label, span, div, small,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stCaptionContainer"] {
+    color: inherit;
+}
+
+[data-testid="stCaptionContainer"], .stCaption, small {
+    color: var(--rs-muted) !important;
+}
+
+a { color: var(--rs-primary) !important; }
+a:hover { color: var(--rs-primary-hover) !important; }
+
+/* Hero */
 .rs-hero {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1.3rem;
-    margin: .1rem 0 1rem;
-    padding: 1.25rem 1.4rem;
-    border: 1px solid var(--rs-line);
-    border-radius: var(--rs-radius-lg);
+    position: relative;
+    overflow: hidden;
+    margin: .15rem 0 1.05rem 0;
+    padding: 1.45rem 1.65rem 1.35rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 22px;
     background:
-        radial-gradient(circle at 92% 15%, rgba(72, 135, 102, .12), transparent 31%),
-        linear-gradient(135deg, #F5F8F6 0%, #EBF1ED 100%);
+        radial-gradient(circle at 84% 8%, rgba(81, 151, 112, .15), transparent 30%),
+        linear-gradient(135deg, rgba(248, 251, 249, .97), rgba(233, 241, 236, .94));
     box-shadow: var(--rs-shadow-soft);
 }
-.rs-hero-copy { min-width: 0; }
-.rs-eyebrow,
-.rs-section-eyebrow,
-.rs-side-kicker {
-    color: var(--rs-accent);
-    font-size: .67rem;
-    font-weight: 820;
-    letter-spacing: .13em;
+.rs-hero::after {
+    content: "";
+    position: absolute;
+    inset: auto -28px -54px auto;
+    width: 180px;
+    height: 180px;
+    border-radius: 999px;
+    border: 1px solid rgba(45, 123, 87, .10);
+    box-shadow: 0 0 0 22px rgba(45, 123, 87, .025), 0 0 0 45px rgba(45, 123, 87, .018);
+}
+.rs-eyebrow {
+    color: var(--rs-primary);
+    font-size: .68rem;
+    font-weight: 850;
+    letter-spacing: .15em;
     text-transform: uppercase;
 }
 .rs-hero h1 {
-    margin: .28rem 0 .32rem !important;
-    font-size: clamp(1.8rem, 2.5vw, 2.45rem) !important;
-    line-height: 1.06 !important;
-    font-weight: 760 !important;
+    margin: .33rem 0 .38rem;
+    font-size: clamp(1.7rem, 2.2vw, 2.5rem);
+    line-height: 1.05;
+    font-weight: 790;
 }
 .rs-hero p {
-    max-width: 760px;
-    margin: 0 !important;
-    color: var(--rs-ink-2) !important;
-    font-size: .93rem;
+    max-width: 780px;
+    margin: 0;
+    color: var(--rs-muted) !important;
+    font-size: .95rem;
     line-height: 1.55;
 }
-.rs-live-badge {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: .42rem;
-    padding: .48rem .68rem;
-    border: 1px solid #BDD3C6;
-    border-radius: 999px;
-    background: #E2EEE7;
-    color: #285E47;
-    font-size: .69rem;
-    font-weight: 760;
-    letter-spacing: .04em;
-    white-space: nowrap;
-}
-.rs-live-dot {
-    width: .43rem;
-    height: .43rem;
-    border-radius: 50%;
-    background: #3E8A65;
-    box-shadow: 0 0 0 4px rgba(62, 138, 101, .11);
-}
 
-/* ---------- Sidebar ---------- */
+/* Sidebar */
 section[data-testid="stSidebar"] {
-    width: 340px !important;
-    min-width: 340px !important;
-    background: linear-gradient(180deg, #F0F4F1 0%, #E9EFEB 100%) !important;
-    border-right: 1px solid var(--rs-line) !important;
-    box-shadow: 10px 0 30px rgba(31, 63, 49, .035) !important;
+    background: linear-gradient(180deg, rgba(248, 251, 249, .985), rgba(236, 243, 239, .985)) !important;
+    border-right: 1px solid var(--rs-border) !important;
+    box-shadow: 12px 0 32px rgba(37, 76, 58, .045);
 }
-section[data-testid="stSidebar"] > div,
-section[data-testid="stSidebar"] [data-testid="stSidebarContent"] { background: transparent !important; }
+section[data-testid="stSidebar"] > div {
+    background: transparent !important;
+}
 section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
     padding-top: 1rem !important;
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
 }
 .rs-sidebrand {
-    margin: 0 0 .95rem;
-    padding: 1rem;
-    border: 1px solid var(--rs-line);
-    border-radius: 15px;
-    background: rgba(248, 250, 248, .74);
-    box-shadow: var(--rs-shadow-soft);
+    margin: .1rem 0 .8rem;
+    padding: 1rem 1rem .9rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, .47);
+    box-shadow: 0 7px 20px rgba(37, 76, 58, .055);
+}
+.rs-sidebrand .kicker {
+    color: var(--rs-primary);
+    font-size: .63rem;
+    font-weight: 850;
+    letter-spacing: .14em;
+    text-transform: uppercase;
 }
 .rs-sidebrand .name {
-    margin-top: .28rem;
-    color: var(--rs-ink);
-    font-size: 1.08rem;
-    font-weight: 760;
+    margin-top: .3rem;
+    color: var(--rs-text);
+    font-size: 1.15rem;
+    font-weight: 780;
 }
 .rs-sidebrand .meta {
-    margin-top: .25rem;
-    color: var(--rs-ink-3);
-    font-size: .72rem;
-    line-height: 1.45;
-}
-.rs-side-section {
-    margin: 1rem 0 .7rem;
-    padding-top: .9rem;
-    border-top: 1px solid var(--rs-line-soft);
-}
-.rs-side-section.first { margin-top: .25rem; padding-top: 0; border-top: 0; }
-.rs-side-section-title {
-    color: var(--rs-ink);
-    font-size: .88rem;
-    font-weight: 750;
-}
-.rs-side-section-note {
-    margin-top: .2rem;
-    color: var(--rs-ink-3);
-    font-size: .71rem;
-    line-height: 1.4;
+    margin-top: .18rem;
+    color: var(--rs-muted);
+    font-size: .73rem;
 }
 
-/* Explicit label contrast, including sidebar widgets. */
-[data-testid="stWidgetLabel"] p,
-[data-testid="stWidgetLabel"] span,
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] label p,
-section[data-testid="stSidebar"] label span {
-    color: var(--rs-ink-2) !important;
-    -webkit-text-fill-color: var(--rs-ink-2) !important;
-    opacity: 1 !important;
-    font-weight: 670 !important;
-}
-[data-testid="stWidgetLabel"] p { font-size: .79rem !important; }
-
-/* ---------- Native controls ---------- */
+/* Inputs, dropdowns, date pickers, text areas */
 [data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
 [data-testid="stDateInput"] input,
 [data-testid="stTextArea"] textarea,
-[data-testid="stNumberInput"] input,
-[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-baseweb="input"] > div,
+[data-baseweb="select"] > div,
 [data-baseweb="base-input"],
-[data-baseweb="input"] > div {
-    color: var(--rs-ink) !important;
-    -webkit-text-fill-color: var(--rs-ink) !important;
-    background: var(--rs-control) !important;
-    border-color: var(--rs-line) !important;
+.stTextInput input,
+.stTextArea textarea {
+    color: var(--rs-text) !important;
+    background: var(--rs-surface-2) !important;
+    border-color: var(--rs-border-strong) !important;
     border-radius: var(--rs-radius-sm) !important;
     box-shadow: none !important;
 }
-[data-testid="stTextInput"] input,
-[data-testid="stDateInput"] input,
-[data-testid="stNumberInput"] input { min-height: 2.55rem !important; }
-[data-testid="stTextArea"] textarea { line-height: 1.5 !important; }
 
 [data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus,
 [data-testid="stDateInput"] input:focus,
 [data-testid="stTextArea"] textarea:focus,
-[data-testid="stNumberInput"] input:focus,
-[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
+[data-baseweb="select"] > div:focus-within,
 [data-baseweb="input"] > div:focus-within {
-    border-color: var(--rs-accent) !important;
-    box-shadow: 0 0 0 3px rgba(47, 111, 83, .11) !important;
-}
-
-/* Streamlit number-input steppers must not inherit red/black theme buttons. */
-[data-testid="stNumberInput"] button,
-[data-testid="stNumberInput"] button[kind],
-section[data-testid="stSidebar"] [data-testid="stNumberInput"] button {
-    min-height: 0 !important;
-    height: 100% !important;
-    border: 0 !important;
-    border-left: 1px solid var(--rs-line) !important;
-    border-radius: 0 !important;
-    background: #E4EBE7 !important;
-    color: #315647 !important;
-    -webkit-text-fill-color: #315647 !important;
-    box-shadow: none !important;
-    transform: none !important;
-}
-[data-testid="stNumberInput"] button:hover {
-    background: #D8E3DC !important;
-    color: var(--rs-accent-deep) !important;
-}
-[data-testid="stNumberInput"] button svg,
-[data-testid="stNumberInput"] button * {
-    color: #315647 !important;
-    fill: currentColor !important;
-    stroke: currentColor !important;
+    border-color: var(--rs-primary) !important;
+    box-shadow: 0 0 0 3px var(--rs-primary-soft) !important;
 }
 
 input:disabled, textarea:disabled,
 [data-testid="stTextInput"] input:disabled,
 [data-testid="stTextArea"] textarea:disabled {
-    color: #63766D !important;
-    -webkit-text-fill-color: #63766D !important;
+    color: #5D7469 !important;
+    -webkit-text-fill-color: #5D7469 !important;
     opacity: 1 !important;
-    background: #E4EAE7 !important;
+    background: #E4EBE7 !important;
 }
-::placeholder { color: #87958E !important; opacity: 1 !important; }
 
-/* Dropdown portal and date calendar. */
+::placeholder {
+    color: var(--rs-faint) !important;
+    opacity: 1 !important;
+}
+
+/* BaseWeb dropdown portal, calendar and menus */
 [data-baseweb="popover"],
 [data-baseweb="menu"],
-ul[role="listbox"],
+[data-baseweb="select"] ul,
 [role="listbox"] {
-    background: #F4F7F5 !important;
-    color: var(--rs-ink) !important;
-    border-color: var(--rs-line) !important;
-    border-radius: 11px !important;
+    background: #F5F8F6 !important;
+    color: var(--rs-text) !important;
+    border: 1px solid var(--rs-border-strong) !important;
+    border-radius: 12px !important;
     box-shadow: var(--rs-shadow) !important;
 }
-[role="option"],
-[data-baseweb="menu"] li {
-    color: var(--rs-ink) !important;
-    -webkit-text-fill-color: var(--rs-ink) !important;
+[role="option"], [data-baseweb="menu"] li {
+    color: var(--rs-text) !important;
     background: transparent !important;
 }
 [role="option"]:hover,
 [role="option"][aria-selected="true"],
 [data-baseweb="menu"] li:hover {
-    color: var(--rs-accent-deep) !important;
-    background: var(--rs-accent-soft) !important;
-}
-[data-baseweb="calendar"] {
-    color: var(--rs-ink) !important;
-    background: #F4F7F5 !important;
-    border: 1px solid var(--rs-line) !important;
-    box-shadow: var(--rs-shadow) !important;
-}
-[data-baseweb="calendar"] button {
-    color: var(--rs-ink) !important;
-    background: transparent !important;
-}
-[data-baseweb="calendar"] [aria-selected="true"] {
-    color: #F7FAF8 !important;
-    background: var(--rs-accent) !important;
+    color: #17372B !important;
+    background: #DCE9E1 !important;
 }
 
-/* ---------- Buttons ---------- */
+[data-baseweb="calendar"] {
+    background: #F5F8F6 !important;
+    color: var(--rs-text) !important;
+}
+[data-baseweb="calendar"] button {
+    color: var(--rs-text) !important;
+}
+[data-baseweb="calendar"] [aria-selected="true"] {
+    background: var(--rs-primary) !important;
+    color: white !important;
+}
+
+/* Buttons */
 .stButton > button,
 .stDownloadButton > button,
-[data-testid="stFormSubmitButton"] > button {
-    min-height: 2.55rem !important;
-    border: 1px solid var(--rs-line) !important;
-    border-radius: 10px !important;
-    background: linear-gradient(180deg, #F5F8F6, #E7ECE9) !important;
-    color: var(--rs-ink) !important;
-    -webkit-text-fill-color: var(--rs-ink) !important;
-    font-weight: 720 !important;
-    box-shadow: 0 4px 12px rgba(31, 63, 49, .055) !important;
-    transition: .16s ease !important;
+[data-testid="stFormSubmitButton"] > button,
+button[kind="secondary"] {
+    min-height: 2.55rem;
+    border: 1px solid var(--rs-border-strong) !important;
+    border-radius: 11px !important;
+    background: linear-gradient(180deg, #F7FAF8, #E9F0EC) !important;
+    color: var(--rs-text) !important;
+    font-weight: 760 !important;
+    box-shadow: 0 5px 14px rgba(37, 76, 58, .065) !important;
+    transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease;
 }
 .stButton > button:hover,
 .stDownloadButton > button:hover,
-[data-testid="stFormSubmitButton"] > button:hover {
-    border-color: #AFC4B8 !important;
-    background: #E1E9E4 !important;
-    color: var(--rs-accent-deep) !important;
+[data-testid="stFormSubmitButton"] > button:hover,
+button[kind="secondary"]:hover {
+    border-color: rgba(45, 123, 87, .38) !important;
+    background: #E0EBE4 !important;
+    color: var(--rs-primary-hover) !important;
     transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(37, 76, 58, .10) !important;
 }
 .stButton > button[kind="primary"],
-[data-testid="stFormSubmitButton"] > button[kind="primary"] {
-    border-color: var(--rs-accent-deep) !important;
-    background: linear-gradient(135deg, #34785A 0%, #285F47 100%) !important;
-    color: #F8FAF9 !important;
-    -webkit-text-fill-color: #F8FAF9 !important;
-    box-shadow: 0 9px 22px rgba(47, 111, 83, .18) !important;
+[data-testid="stFormSubmitButton"] > button[kind="primary"],
+button[kind="primary"] {
+    border-color: #2D7B57 !important;
+    background: linear-gradient(135deg, #2D7B57, #236445) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    box-shadow: 0 9px 22px rgba(45, 123, 87, .22) !important;
 }
 .stButton > button[kind="primary"] *,
-[data-testid="stFormSubmitButton"] > button[kind="primary"] * {
-    color: #F8FAF9 !important;
-    -webkit-text-fill-color: #F8FAF9 !important;
+[data-testid="stFormSubmitButton"] > button[kind="primary"] *,
+button[kind="primary"] * {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
 }
 .stButton > button[kind="primary"]:hover,
-[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
-    background: linear-gradient(135deg, #2E6C51 0%, #234F3C 100%) !important;
-}
-.st-key-rs_sign_out button {
-    min-height: 2.15rem !important;
-    background: transparent !important;
-    box-shadow: none !important;
-    color: var(--rs-ink-2) !important;
-    font-size: .76rem !important;
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover,
+button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #286F4F, #1F5A3E) !important;
+    color: #FFFFFF !important;
 }
 
-/* ---------- Checkbox / slider ---------- */
+/* Toggle / checkbox / slider */
 [data-testid="stCheckbox"] label p {
-    color: var(--rs-ink) !important;
-    -webkit-text-fill-color: var(--rs-ink) !important;
-    font-size: .88rem !important;
-    font-weight: 640 !important;
+    color: var(--rs-text) !important;
+    font-size: .94rem !important;
+    font-weight: 650 !important;
     line-height: 1.38 !important;
 }
-[data-testid="stCheckbox"] input { accent-color: var(--rs-accent) !important; }
-[data-baseweb="checkbox"] > div:first-child { border-color: #9DB3A7 !important; }
-[data-testid="stSlider"] [role="slider"] {
-    background: var(--rs-accent) !important;
-    border-color: var(--rs-accent) !important;
+[data-testid="stCheckbox"] label { gap: .45rem !important; }
+[data-testid="stCheckbox"] input { accent-color: var(--rs-primary) !important; }
+[data-baseweb="checkbox"] > div:first-child {
+    border-color: var(--rs-border-strong) !important;
 }
-[data-testid="stSlider"] div[data-baseweb="slider"] > div > div { background: rgba(47, 111, 83, .25) !important; }
+[data-testid="stSlider"] [role="slider"] {
+    background: var(--rs-primary) !important;
+    border-color: var(--rs-primary) !important;
+}
+[data-testid="stSlider"] div[data-baseweb="slider"] > div > div {
+    background: rgba(45, 123, 87, .22) !important;
+}
 
-/* ---------- Forms / panels / expanders ---------- */
-[data-testid="stForm"],
-[data-testid="stVerticalBlockBorderWrapper"] {
-    border-color: var(--rs-line) !important;
-    border-radius: var(--rs-radius) !important;
-    background: rgba(244, 247, 245, .90) !important;
-    box-shadow: none !important;
+/* Forms / expanders / cards */
+[data-testid="stForm"] {
+    border: 1px solid var(--rs-border) !important;
+    border-radius: var(--rs-radius-lg) !important;
+    background: rgba(243, 246, 244, .94) !important;
+    box-shadow: var(--rs-shadow-soft) !important;
 }
 [data-testid="stExpander"] {
     overflow: hidden;
-    border: 1px solid var(--rs-line) !important;
-    border-radius: 11px !important;
-    background: rgba(244, 247, 245, .76) !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: var(--rs-radius) !important;
+    background: rgba(243, 246, 244, .78) !important;
     box-shadow: none !important;
 }
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] summary p,
-[data-testid="stExpander"] summary span {
-    color: var(--rs-ink-2) !important;
-    -webkit-text-fill-color: var(--rs-ink-2) !important;
-    font-weight: 660 !important;
+[data-testid="stExpander"] summary:hover {
+    background: var(--rs-hover) !important;
 }
-[data-testid="stExpander"] summary:hover { background: #E6EDE9 !important; }
-hr { border-color: var(--rs-line-soft) !important; }
+hr {
+    border-color: rgba(50, 91, 72, .12) !important;
+}
 
-/* ---------- Alerts / status ---------- */
-[data-testid="stAlert"],
-[data-baseweb="notification"] {
-    color: var(--rs-ink) !important;
-    background: #E5EDE8 !important;
-    border: 1px solid #C6D6CC !important;
-    border-radius: 11px !important;
+/* Status messages */
+[data-testid="stAlert"] {
+    border-radius: var(--rs-radius) !important;
+    border-width: 1px !important;
     box-shadow: none !important;
 }
-[data-testid="stAlert"] > div,
-[data-baseweb="notification"] > div { background: transparent !important; }
-[data-testid="stAlert"] p,
-[data-testid="stAlert"] span,
-[data-baseweb="notification"] p,
-[data-baseweb="notification"] span { color: var(--rs-ink) !important; }
-.stSuccess { background: #E1ECE5 !important; border-color: #BFD4C6 !important; }
-.stWarning { background: #F1EBDD !important; border-color: #DCCDAE !important; }
-.stError { background: #F3E3E6 !important; border-color: #DCBEC5 !important; }
-
-.rs-status,
-.rs-empty-state {
-    margin: .45rem 0 .9rem;
-    padding: .85rem .95rem;
-    border: 1px solid var(--rs-line);
-    border-radius: 11px;
-    background: #E9EFEB;
-    color: var(--rs-ink-2);
-    font-size: .84rem;
-    line-height: 1.45;
+[data-testid="stAlert"] p { color: var(--rs-text) !important; }
+.stSuccess, [data-testid="stAlert"]:has([data-testid="stNotificationContentSuccess"]) {
+    background: rgba(47, 143, 97, .09) !important;
+    border-color: rgba(47, 143, 97, .24) !important;
 }
-.rs-status strong, .rs-empty-state strong { color: var(--rs-ink); }
-.rs-status-success { border-color: #BFD3C6; background: #E2ECE6; }
-
-/* ---------- Section headers ---------- */
-.rs-section-head {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 1rem;
-    margin: 1.55rem 0 .65rem;
+.stWarning, [data-testid="stAlert"]:has([data-testid="stNotificationContentWarning"]) {
+    background: rgba(184, 121, 39, .10) !important;
+    border-color: rgba(184, 121, 39, .24) !important;
 }
-.rs-section-title {
-    margin-top: .2rem;
-    color: var(--rs-ink);
-    font-size: 1.2rem;
-    font-weight: 760;
-    letter-spacing: -.02em;
-}
-.rs-section-note {
-    max-width: 580px;
-    color: var(--rs-ink-3);
-    font-size: .77rem;
-    line-height: 1.45;
-    text-align: right;
-}
-.rs-category-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 1rem 0 .45rem;
-    color: var(--rs-ink);
-    font-size: .91rem;
-    font-weight: 740;
-}
-.rs-category-count {
-    color: var(--rs-ink-3);
-    font-size: .7rem;
-    font-weight: 640;
-}
-.rs-room-pricing {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: .45rem;
-    margin: -.2rem 0 .35rem 2rem;
-}
-.rs-room-stat {
-    min-width: 0;
-    padding: .52rem .62rem;
-    border: 1px solid var(--rs-line-soft);
-    border-radius: 9px;
-    background: #EDF2EF;
-}
-.rs-room-stat .label {
-    color: var(--rs-ink-3);
-    font-size: .62rem;
-    font-weight: 720;
-    letter-spacing: .055em;
-    text-transform: uppercase;
-}
-.rs-room-stat .value {
-    margin-top: .12rem;
-    color: var(--rs-ink);
-    font-size: .88rem;
-    font-weight: 740;
+.stError, [data-testid="stAlert"]:has([data-testid="stNotificationContentError"]) {
+    background: rgba(197, 82, 102, .09) !important;
+    border-color: rgba(197, 82, 102, .24) !important;
 }
 
-/* ---------- Search context cards ---------- */
+/* Metrics and technical summary */
+[data-testid="stMetric"] {
+    padding: .82rem .95rem !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 14px !important;
+    background: rgba(243, 246, 244, .92) !important;
+    box-shadow: 0 5px 15px rgba(37, 76, 58, .045) !important;
+}
+[data-testid="stMetricLabel"] { color: var(--rs-muted) !important; }
+[data-testid="stMetricValue"] { color: var(--rs-text) !important; font-weight: 780 !important; }
+
 .rs-summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
-    gap: .65rem;
-    margin: .15rem 0 .85rem;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .72rem;
+    margin: .15rem 0 .95rem;
 }
 .rs-summary-card {
     min-width: 0;
-    padding: .78rem .88rem;
-    border: 1px solid var(--rs-line);
-    border-radius: 12px;
-    background: rgba(244, 247, 245, .92);
-    box-shadow: 0 4px 13px rgba(31, 63, 49, .04);
+    padding: .86rem .95rem .82rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 14px;
+    background: rgba(243, 246, 244, .91);
+    box-shadow: 0 5px 15px rgba(37, 76, 58, .045);
 }
 .rs-summary-card .label {
-    color: var(--rs-ink-3);
-    font-size: .64rem;
-    font-weight: 760;
-    letter-spacing: .07em;
+    color: var(--rs-muted);
+    font-size: .69rem;
+    font-weight: 780;
+    letter-spacing: .055em;
     text-transform: uppercase;
 }
 .rs-summary-card .value {
-    margin-top: .21rem;
-    color: var(--rs-ink);
-    font-size: 1.04rem;
-    font-weight: 760;
+    margin-top: .26rem;
+    color: var(--rs-text);
+    font-size: 1.15rem;
+    font-weight: 790;
     line-height: 1.15;
 }
 .rs-summary-card .foot {
-    margin-top: .18rem;
-    color: var(--rs-ink-3);
-    font-size: .69rem;
+    margin-top: .2rem;
+    color: var(--rs-muted);
+    font-size: .72rem;
     line-height: 1.35;
-    white-space: normal;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-/* ---------- Data / code ---------- */
-[data-testid="stDataFrame"], [data-testid="stTable"] {
-    overflow: hidden !important;
-    border: 1px solid var(--rs-line) !important;
-    border-radius: 12px !important;
+/* Dataframe shell */
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+    overflow: hidden;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 14px !important;
     background: #F2F5F3 !important;
-    box-shadow: none !important;
+    box-shadow: var(--rs-shadow-soft) !important;
 }
+[data-testid="stDataFrame"] iframe,
+[data-testid="stDataFrame"] canvas {
+    border-radius: 12px !important;
+}
+
+/* Code, JSON and URL detail */
 [data-testid="stCodeBlock"], pre, code {
-    color: #29483B !important;
-    background: #E6ECE8 !important;
-    border-color: var(--rs-line) !important;
+    color: #254238 !important;
+    background: #E8EFEB !important;
+    border-color: var(--rs-border) !important;
 }
-[data-testid="stSpinner"] > div { border-top-color: var(--rs-accent) !important; }
 
-/* ---------- Login ---------- */
-.rs-login-brand {
-    max-width: 620px;
-    margin: 6vh auto 1rem;
-    padding: 1.2rem 1.35rem;
-    border: 1px solid var(--rs-line);
-    border-radius: 16px;
-    background: #F3F6F4;
-    box-shadow: var(--rs-shadow-soft);
-}
-.rs-login-brand h1 {
-    margin: .25rem 0 .35rem !important;
-    font-size: 1.55rem !important;
-    font-weight: 760 !important;
-}
-.rs-login-brand p { margin: 0 !important; color: var(--rs-ink-2) !important; }
+/* Spinner */
+[data-testid="stSpinner"] > div { border-top-color: var(--rs-primary) !important; }
 
-/* ---------- Scrollbars ---------- */
+/* Scrollbars */
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
 *::-webkit-scrollbar-thumb {
     border: 3px solid transparent;
     border-radius: 999px;
-    background: rgba(47, 111, 83, .25);
+    background: rgba(45, 123, 87, .26);
     background-clip: padding-box;
 }
-*::-webkit-scrollbar-thumb:hover { background: rgba(47, 111, 83, .42); background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(45, 123, 87, .42); background-clip: padding-box; }
 
-/* ---------- Responsive ---------- */
-@media (max-width: 1180px) {
-    section[data-testid="stSidebar"] { width: 320px !important; min-width: 320px !important; }
-    .stMainBlockContainer, section.main > div.block-container { padding-left: 1rem !important; padding-right: 1rem !important; }
-    .rs-room-pricing { grid-template-columns: repeat(3, minmax(110px, 1fr)); }
+/* Tighten section rhythm */
+[data-testid="stVerticalBlock"] > div:has(> [data-testid="stHeadingWithActionElements"]) {
+    margin-top: .2rem;
 }
-@media (max-width: 980px) {
-    .stMainBlockContainer [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
-    .stMainBlockContainer [data-testid="column"] { min-width: min(300px, 100%) !important; flex: 1 1 300px !important; }
-    .rs-hero { align-items: flex-start; }
-    .rs-section-head { align-items: flex-start; flex-direction: column; gap: .25rem; }
-    .rs-section-note { text-align: left; }
-}
-@media (max-width: 700px) {
-    .stMainBlockContainer, section.main > div.block-container { padding: .9rem .7rem 3rem !important; }
-    .rs-hero { flex-direction: column; padding: 1rem; border-radius: 14px; }
+
+@media (max-width: 900px) {
     .rs-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .rs-room-pricing { grid-template-columns: 1fr; margin-left: 0; }
+    .stMainBlockContainer, section.main > div.block-container {
+        padding-left: .85rem !important;
+        padding-right: .85rem !important;
+    }
+    .rs-hero { padding: 1.15rem 1.15rem 1.05rem; border-radius: 17px; }
 }
 </style>
-
 """
 
-st.markdown(STREAMLIT_ENTERPRISE_CSS, unsafe_allow_html=True)
+st.markdown(STREAMLIT_SAGE_CSS, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -1052,15 +905,10 @@ def login_required() -> None:
     if browser_token:
         render_invalid_auth_token_clearer()
 
-    st.markdown(
-        f"""
-        <div class="rs-login-brand">
-          <div class="rs-side-kicker">Secure Commercial Access</div>
-          <h1>Starwood Hotel Rate Shop</h1>
-          <p>Sign in to the live pricing workspace. This browser can be remembered for up to {get_remember_login_days()} day(s); plaintext credentials are never stored.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.title("🔐 Starwood Hotel Rateshop Login")
+    st.caption(
+        f"A successful login will be remembered in this browser for up to "
+        f"{get_remember_login_days()} day(s). No plaintext password is stored."
     )
 
     with st.form("login_form", clear_on_submit=False):
@@ -2600,30 +2448,27 @@ def render_copy_button(text_to_copy: str) -> None:
     escaped_text = html.escape(text_to_copy or "")
     components.html(
         f"""
-        <style>
-          html, body {{ margin:0; padding:0; background:transparent; font-family:Inter,Segoe UI,sans-serif; }}
-        </style>
-        <div style="display:flex; align-items:center; gap:8px; height:42px; background:transparent;">
+        <div style="display:flex; align-items:center; gap:8px; height:42px;">
             <textarea id="email-copy-source" style="position:absolute; left:-9999px; top:-9999px;">{escaped_text}</textarea>
             <button
                 id="copy-email-button"
                 style="
                     width:100%;
                     height:38px;
-                    border:1px solid #C9D5CE;
-                    border-radius:10px;
-                    background:linear-gradient(180deg,#F2F5F3,#E5ECE8);
-                    color:#173229;
-                    font-weight:720;
-                    box-shadow:0 4px 12px rgba(31,63,49,.055);
+                    border:1px solid rgba(50,91,72,.26);
+                    border-radius:11px;
+                    background:linear-gradient(180deg,#F7FAF8,#E9F0EC);
+                    color:#18352B;
+                    font-weight:760;
+                    box-shadow:0 5px 14px rgba(37,76,58,.065);
                     cursor:pointer;
                 "
                 onclick="
                     const source = document.getElementById('email-copy-source');
                     const button = document.getElementById('copy-email-button');
                     navigator.clipboard.writeText(source.value).then(function() {{
-                        button.innerText = 'Copied to clipboard';
-                        setTimeout(function() {{ button.innerText = 'Copy email'; }}, 1400);
+                        button.innerText = 'Copied';
+                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
                     }}).catch(function() {{
                         source.style.position = 'fixed';
                         source.style.left = '0';
@@ -2634,11 +2479,11 @@ def render_copy_button(text_to_copy: str) -> None:
                         source.style.position = 'absolute';
                         source.style.left = '-9999px';
                         source.style.top = '-9999px';
-                        button.innerText = 'Copied to clipboard';
-                        setTimeout(function() {{ button.innerText = 'Copy email'; }}, 1400);
+                        button.innerText = 'Copied';
+                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
                     }});
                 "
-            >Copy email</button>
+            >Copy</button>
         </div>
         """,
         height=46,
@@ -2648,32 +2493,12 @@ def render_copy_button(text_to_copy: str) -> None:
 # ============================================================
 # UI
 # ============================================================
-def render_section_heading(title: str, note: str = "", eyebrow: str = "") -> None:
-    eyebrow_html = f'<div class="rs-section-eyebrow">{html.escape(eyebrow)}</div>' if eyebrow else ""
-    note_html = f'<div class="rs-section-note">{html.escape(note)}</div>' if note else ""
-    st.markdown(
-        f"""
-        <div class="rs-section-head">
-          <div>
-            {eyebrow_html}
-            <div class="rs-section-title">{html.escape(title)}</div>
-          </div>
-          {note_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 st.markdown(
     """
     <div class="rs-hero">
-      <div class="rs-hero-copy">
-        <div class="rs-eyebrow">Commercial Intelligence · Live Pricing</div>
-        <h1>Rate Shop</h1>
-        <p>Validate live room rates, structure a commercially disciplined offer, and prepare a client-ready quote without leaving the pricing workflow.</p>
-      </div>
-      <div class="rs-live-badge"><span class="rs-live-dot"></span> LIVE BOOKING ENGINE</div>
+      <div class="rs-eyebrow">Commercial Intelligence · Live Pricing</div>
+      <h1>Rate Shop</h1>
+      <p>Search live room inventory, shape a competitive offer, and turn selected room types into a client-ready quote from one focused workspace.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -2681,32 +2506,23 @@ st.markdown(
 
 with st.sidebar:
     st.markdown(
-        """
+        f"""
         <div class="rs-sidebrand">
-          <div class="rs-side-kicker">Commercial Tools</div>
+          <div class="kicker">Commercial Tools</div>
           <div class="name">Rate Shop</div>
-          <div class="meta">Live pricing and quote preparation workspace</div>
+          <div class="meta">Live pricing workspace · {html.escape(APP_VERSION)}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    st.markdown("#### Search Settings")
 
-    if st.button("Sign out", key="rs_sign_out", use_container_width=True):
+    if st.button("LOGOUT"):
         st.session_state.authenticated = False
         st.session_state.pop("authenticated_user_name", None)
         st.session_state.pop("authenticated_via_browser_token", None)
         render_logout_and_reload()
         st.stop()
-
-    st.markdown(
-        """
-        <div class="rs-side-section first">
-          <div class="rs-side-section-title">Search parameters</div>
-          <div class="rs-side-section-note">Set the hotel, stay dates and party size used against the live booking engine.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     hotel_key = st.selectbox(
         "Hotel",
@@ -2723,16 +2539,6 @@ with st.sidebar:
 
     adults = st.number_input("Adults", min_value=1, max_value=10, value=1, step=1)
     children = st.number_input("Children", min_value=0, max_value=10, value=0, step=1)
-
-    st.markdown(
-        """
-        <div class="rs-side-section">
-          <div class="rs-side-section-title">Quote rule</div>
-          <div class="rs-side-section-note">Apply a controlled client offer to the live selling rate.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     discount_percent = st.number_input(
         "Offer discount %",
         min_value=0.0,
@@ -2743,28 +2549,24 @@ with st.sidebar:
     st.checkbox("Rates include tax in client email", key="rates_include_tax")
 
     with st.expander("Advanced search options", expanded=False):
-        st.caption(
-            f"Property {hotel_key} · code {hotel_code} · {hotel_provider.title()} · display {selected_currency_symbol}"
-        )
+        st.caption(f"Hotel code {hotel_code} · {hotel_provider} · display {selected_currency_symbol}")
         currency = st.selectbox("Booking currency", options=["USD"], index=0)
         sort = st.selectbox("Rate sort", options=["low", "high"], index=0)
         group_code = st.text_input("Group code", value="")
         promo_code = st.text_input("Promo code", value="")
         wait_seconds = st.slider("Search timeout seconds", 8, 20, 10, 1)
 
-    search_clicked = st.button("Search live rates", type="primary", use_container_width=True)
-    st.caption("Rates are retrieved from the live booking flow and should be revalidated before final client commitment.")
+    search_clicked = st.button("SEARCH LIVE RATES", type="primary", use_container_width=True)
 
-    with st.expander("System details", expanded=False):
-        st.caption(f"App version: {APP_VERSION}")
+    with st.expander("Browser runtime", expanded=False):
         runtime = get_chrome_runtime()
-        st.write("Chromium", runtime.get("chromium_binary") or "not found")
-        st.write("Chromedriver", runtime.get("chromedriver_binary") or "not found")
+        st.write("Chromium:", runtime.get("chromium_binary") or "not found")
+        st.write("Chromedriver:", runtime.get("chromedriver_binary") or "not found")
         st.caption(str(runtime.get("chromium_version") or ""))
         st.caption(str(runtime.get("chromedriver_version") or ""))
 
 if checkout <= checkin:
-    st.error("Check-out date must be later than check-in date.")
+    st.error("Check-out date must be later than Check-in date.")
     st.stop()
 
 
@@ -2786,9 +2588,9 @@ st.markdown(
     f"""
     <div class="rs-summary-grid">
       <div class="rs-summary-card">
-        <div class="label">Property</div>
+        <div class="label">Hotel</div>
         <div class="value">{html.escape(hotel_key)}</div>
-        <div class="foot">{html.escape(hotel_provider.title())} · hotel code {html.escape(hotel_code)}</div>
+        <div class="foot">{html.escape(hotel_provider.title())} · code {html.escape(hotel_code)}</div>
       </div>
       <div class="rs-summary-card">
         <div class="label">Stay</div>
@@ -2798,22 +2600,19 @@ st.markdown(
       <div class="rs-summary-card">
         <div class="label">Guests</div>
         <div class="value">{party_size}</div>
-        <div class="foot">{int(adults)} adult{'s' if int(adults) != 1 else ''} · {int(children)} child{'ren' if int(children) != 1 else ''}</div>
+        <div class="foot">{int(adults)} adult · {int(children)} child</div>
       </div>
       <div class="rs-summary-card">
-        <div class="label">Client Offer</div>
+        <div class="label">Offer</div>
         <div class="value">{float(discount_percent):g}% off</div>
-        <div class="foot">Displayed in {html.escape(selected_currency_symbol)}</div>
+        <div class="foot">Display currency {html.escape(selected_currency_symbol)}</div>
       </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.expander("Search context & booking URL", expanded=False):
-    st.caption(
-        f"Booking provider: {hotel_provider.title()} · property code: {hotel_code} · sort: {sort} · booking currency: {currency}"
-    )
+with st.expander("Booking URL & technical details", expanded=False):
     st.code(target_url, language=None)
 
 email_clicked = False
@@ -2828,8 +2627,6 @@ if "last_error" not in st.session_state:
     st.session_state.last_error = ""
 if "generated_email" not in st.session_state:
     st.session_state.generated_email = ""
-if "last_retrieval_note" not in st.session_state:
-    st.session_state.last_retrieval_note = ""
 
 if search_clicked:
     room_nights_for_search = max((checkout - checkin).days, 1)
@@ -2844,7 +2641,11 @@ if search_clicked:
         price_settle_seconds = 3.0
         price_poll_seconds = 10.0
 
-    with st.spinner("Retrieving live inventory and validating current selling rates…"):
+    with st.spinner(
+        f"Opening booking page for up to {adaptive_wait_seconds}s, waiting {price_settle_seconds:g}s for async prices, "
+        f"then scrolling and polling live prices for at least 6s / up to {price_poll_seconds:g}s. "
+        f"Fallback adds a short second attempt only if no price is found."
+    ):
         try:
             result = scrape_1hotels(
                 target_url,
@@ -2857,10 +2658,7 @@ if search_clicked:
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
 
-            used_fallback = any(
-                item.get("mode") == "fallback" and item.get("status") == "ok"
-                for item in retry_history
-            )
+            used_fallback = any(item.get("mode") == "fallback" and item.get("status") == "ok" for item in retry_history)
             primary_failed_or_empty = bool(
                 retry_history
                 and (
@@ -2873,64 +2671,50 @@ if search_clicked:
                 st.session_state.last_output_text = ""
                 st.session_state.last_df = pd.DataFrame()
                 st.session_state.last_rooms = []
-                st.session_state.last_retrieval_note = ""
-                st.error(
-                    "No live room rates were returned. The booking page may have changed, availability may not have loaded, or automated verification may have interrupted the request."
-                )
-                with st.expander("Technical diagnostics", expanded=False):
+                st.error("No room rates were parsed. The page structure may have changed, the rate component may not have loaded, or anti-bot verification may have been triggered.")
+                with st.expander("Debug: page text preview"):
                     st.text(result.get("page_text_preview", "")[:3500])
+                with st.expander("Debug: HTML preview"):
                     st.code(result.get("html_preview", "")[:3500], language="html")
+                with st.expander("Debug: retry history"):
                     st.json(retry_history)
             else:
+                if used_fallback and primary_failed_or_empty:
+                    st.warning("The primary search attempt failed or returned no rooms. Fallback retry succeeded automatically.")
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
                 st.session_state.last_rooms = rooms
                 st.session_state.generated_email = ""
-                st.session_state.last_retrieval_note = (
-                    "Secondary retrieval pass used after the first pass returned no usable rate rows."
-                    if used_fallback and primary_failed_or_empty
-                    else "Primary live-rate retrieval completed successfully."
-                )
                 for index, room in enumerate(rooms):
                     room_key = get_room_selection_key(index, room)
                     st.session_state[room_key] = False
+                st.success(f"Search completed: parsed {len(rooms)} room type(s).")
+                with st.expander("Debug: retry history", expanded=False):
+                    st.json(retry_history)
         except Exception as exc:
             st.session_state.last_error = str(exc)
-            st.session_state.last_retrieval_note = ""
-            st.error(f"The live-rate service could not complete the search: {exc}")
-            with st.expander("Technical diagnostics", expanded=False):
+            st.error(f"Browser startup or runtime failed: {exc}")
+            with st.expander("Debug: Chrome runtime diagnostics", expanded=True):
                 st.json(get_chrome_runtime())
+            st.warning(
+                "Important: if the error still shows /home/appuser/.cache/selenium/chromedriver, "
+                "Streamlit is still running an older app.py, or the app was not rebooted successfully."
+            )
 
+st.subheader("Room Selection & Offer Builder")
 rooms_for_selection = st.session_state.last_rooms
-render_section_heading(
-    "Room selection & offer builder",
-    "Choose only the room types that should appear in the client-facing quote.",
-    "Live Inventory",
-)
-
 if rooms_for_selection:
-    selected_count = len(get_selected_rooms(rooms_for_selection))
-    retrieval_note = html.escape(st.session_state.last_retrieval_note or "Live rates loaded.")
-    st.markdown(
-        f"""
-        <div class="rs-status rs-status-success">
-          <strong>{len(rooms_for_selection)} live room type(s) loaded.</strong>
-          {selected_count} currently selected for the client quote. {retrieval_note}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    select_all_col, clear_all_col, spacer_col = st.columns([1.15, 1.15, 4.7], gap="small")
+    st.caption("Select the room type(s) you want to include in the email quote.")
+    select_all_col, clear_all_col, spacer_col = st.columns([1, 1, 3])
     with select_all_col:
-        if st.button("Select all", use_container_width=True):
+        if st.button("Select all room types", use_container_width=True):
             for index, room in enumerate(rooms_for_selection):
                 room_key = get_room_selection_key(index, room)
                 st.session_state[room_key] = True
             st.rerun()
     with clear_all_col:
-        if st.button("Clear selection", use_container_width=True):
+        if st.button("Clear selections", use_container_width=True):
             for index, room in enumerate(rooms_for_selection):
                 room_key = get_room_selection_key(index, room)
                 st.session_state[room_key] = False
@@ -2942,99 +2726,56 @@ if rooms_for_selection:
         category_rooms = grouped_selection_rooms.get(category, [])
         if not category_rooms:
             continue
-        st.markdown(
-            f'<div class="rs-category-head"><span>{html.escape(category)}</span><span class="rs-category-count">{len(category_rooms)} option(s)</span></div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"### {category}")
         for room in category_rooms:
             index = room_index_by_identity[id(room)]
+            line = build_selection_label(room, discount_percent)
             room_key = get_room_selection_key(index, room)
-            current = int(room["current_selling"])
-            offer = discount_price(current, discount_percent)
-            saving = max(current - offer, 0)
-            currency_symbol = str(room.get("currency_symbol") or selected_currency_symbol or "$")
-            room_name = normalize_room_name(str(room.get("room_name", "Room")))
-            with st.container(border=True):
-                st.checkbox(room_name, key=room_key)
-                st.markdown(
-                    f"""
-                    <div class="rs-room-pricing">
-                      <div class="rs-room-stat">
-                        <div class="label">Live selling rate</div>
-                        <div class="value">{html.escape(format_money(current, currency_symbol))}</div>
-                      </div>
-                      <div class="rs-room-stat">
-                        <div class="label">Client offer</div>
-                        <div class="value">{html.escape(format_money(offer, currency_symbol))}</div>
-                      </div>
-                      <div class="rs-room-stat">
-                        <div class="label">Offer saving</div>
-                        <div class="value">{html.escape(format_money(saving, currency_symbol))} · {float(discount_percent):g}%</div>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            st.checkbox(line, key=room_key)
 else:
-    st.markdown(
-        """
-        <div class="rs-empty-state">
-          <strong>No live rate result loaded.</strong> Set the search parameters in the left panel and select <strong>Search live rates</strong> to begin.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.info("Click SEARCH to load room types and live rates here.")
+
+st.divider()
+
+email_left, email_right = st.columns([1, 1])
+with email_left:
+    st.subheader("Email Opening")
+    st.text_area(
+        "Opening",
+        key="email_opening",
+        height=150,
+        placeholder="Type the email opening here. Click Save Template to save it only in this browser.",
+        label_visibility="collapsed",
     )
 
-render_section_heading(
-    "Client quote composer",
-    "Keep the message concise, commercially consistent and ready for direct client use.",
-    "Client Communication",
-)
+with email_right:
+    st.subheader("Email Ending")
+    st.text_area(
+        "Ending",
+        key="email_ending",
+        height=150,
+        label_visibility="collapsed",
+    )
 
-with st.container(border=True):
-    email_left, email_right = st.columns([1, 1], gap="large")
-    with email_left:
-        st.markdown("**Opening message**")
-        st.text_area(
-            "Opening",
-            key="email_opening",
-            height=145,
-            placeholder="Add a short personal opening for the client.",
-            label_visibility="collapsed",
-        )
 
-    with email_right:
-        st.markdown("**Closing and commercial terms**")
-        st.text_area(
-            "Ending",
-            key="email_ending",
-            height=145,
-            label_visibility="collapsed",
-        )
+save_template_col, save_template_spacer = st.columns([1, 5])
+with save_template_col:
+    save_template_clicked = st.button("Save Template", type="secondary", use_container_width=True)
 
-    save_template_col, save_template_spacer = st.columns([1.35, 4.65])
-    with save_template_col:
-        save_template_clicked = st.button("Save quote template", type="secondary", use_container_width=True)
+if save_template_clicked:
+    render_local_storage_saver(
+        opening=st.session_state.email_opening,
+        ending=st.session_state.email_ending,
+        rates_include_tax=bool(st.session_state.rates_include_tax),
+    )
 
-    if save_template_clicked:
-        render_local_storage_saver(
-            opening=st.session_state.email_opening,
-            ending=st.session_state.email_ending,
-            rates_include_tax=bool(st.session_state.rates_include_tax),
-        )
-
-st.markdown("#### Generated client email")
-st.caption("Generate after selecting room types. The output can be copied directly into your client email workflow.")
-
-generate_col, spacer_col = st.columns([1.5, 4.5])
-with generate_col:
-    email_clicked = st.button("Generate client email", type="primary", use_container_width=True)
+st.subheader("Generated Email")
+email_button_col, email_button_spacer = st.columns([1, 5])
+with email_button_col:
+    email_clicked = st.button("EMAIL", type="primary", use_container_width=True)
 
 if email_clicked or st.session_state.generated_email:
-    selected_lines_by_category = get_selected_room_lines_by_category(
-        st.session_state.last_rooms,
-        discount_percent,
-    )
+    selected_lines_by_category = get_selected_room_lines_by_category(st.session_state.last_rooms, discount_percent)
     st.session_state.generated_email = build_email_body(
         opening=st.session_state.email_opening,
         ending=st.session_state.email_ending,
@@ -3047,46 +2788,24 @@ if email_clicked or st.session_state.generated_email:
 st.text_area(
     "Email Output",
     value=st.session_state.generated_email,
-    height=330,
+    height=420,
     label_visibility="collapsed",
 )
-copy_button_col, copy_button_spacer = st.columns([1.25, 4.75])
+copy_button_col, copy_button_spacer = st.columns([1, 5])
 with copy_button_col:
     render_copy_button(st.session_state.generated_email)
 
-render_section_heading(
-    "Live rate result",
-    "Commercial view first; raw detected price traces remain available for audit.",
-    "Rate Detail",
-)
-
+st.divider()
+st.subheader("Structured Rate Result")
 if not st.session_state.last_df.empty:
-    commercial_df = st.session_state.last_df.drop(columns=["Detected prices"], errors="ignore")
-    st.dataframe(style_output_dataframe(commercial_df), use_container_width=True, hide_index=True)
-
-    with st.expander("Rate detection audit", expanded=False):
-        audit_columns = [column for column in ["Room Type", "Detected prices"] if column in st.session_state.last_df.columns]
-        if audit_columns:
-            st.dataframe(st.session_state.last_df[audit_columns], use_container_width=True, hide_index=True)
-        st.caption("Audit values show source price candidates detected by the parser and are not client-facing output.")
-
+    st.dataframe(style_output_dataframe(st.session_state.last_df), use_container_width=True, hide_index=True)
     csv_data = st.session_state.last_df.to_csv(index=False).encode("utf-8-sig")
-    download_col, download_spacer = st.columns([1.2, 4.8])
-    with download_col:
-        st.download_button(
-            label="Download CSV",
-            data=csv_data,
-            file_name=f"starwood_{hotel_key}_{checkin}_{checkout}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-else:
-    st.markdown(
-        """
-        <div class="rs-empty-state">
-          <strong>No structured result yet.</strong> The commercial rate table will appear after a successful live-rate search.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.download_button(
+        label="Download CSV",
+        data=csv_data,
+        file_name=f"starwood_{hotel_key}_{checkin}_{checkout}.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
-
+else:
+    st.info("Click SEARCH to load structured room-rate data here.")
