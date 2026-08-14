@@ -30,7 +30,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-07-14 Starwood Hotel Rateshop BAC-persistent-login-v2"
+APP_VERSION = "2026-08-14 Starwood Hotel Rateshop sage-commercial-ui-v1"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -117,25 +117,451 @@ PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    div[data-testid="stCheckbox"] label p {
-        font-size: 18px !important;
-        font-weight: 700 !important;
-        line-height: 1.35 !important;
+STREAMLIT_SAGE_CSS = """
+<style>
+:root {
+    --rs-bg: #E6ECE8;
+    --rs-surface: #F3F6F4;
+    --rs-surface-2: #EDF2EE;
+    --rs-surface-3: #E3EBE6;
+    --rs-hover: #DCE8E0;
+    --rs-border: rgba(50, 91, 72, .14);
+    --rs-border-strong: rgba(50, 91, 72, .26);
+    --rs-text: #18352B;
+    --rs-muted: #63796F;
+    --rs-faint: #879A91;
+    --rs-primary: #2D7B57;
+    --rs-primary-hover: #236445;
+    --rs-primary-soft: rgba(45, 123, 87, .11);
+    --rs-success: #2F8F61;
+    --rs-warning: #B87927;
+    --rs-danger: #C55266;
+    --rs-shadow: 0 18px 50px rgba(37, 76, 58, .12);
+    --rs-shadow-soft: 0 8px 26px rgba(37, 76, 58, .08);
+    --rs-radius-sm: 9px;
+    --rs-radius: 13px;
+    --rs-radius-lg: 18px;
+    --rs-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+html, body, [class*="css"] {
+    font-family: var(--rs-font) !important;
+}
+
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+    color-scheme: light !important;
+    background:
+        radial-gradient(circle at 16% -8%, rgba(101, 187, 139, .17), transparent 31%),
+        radial-gradient(circle at 94% 0%, rgba(184, 222, 199, .23), transparent 28%),
+        var(--rs-bg) !important;
+    color: var(--rs-text) !important;
+}
+
+header[data-testid="stHeader"] {
+    background: rgba(230, 236, 232, .82) !important;
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(50, 91, 72, .06);
+}
+
+[data-testid="stToolbar"], [data-testid="stDecoration"] {
+    color: var(--rs-muted) !important;
+}
+
+.stMainBlockContainer,
+section.main > div.block-container {
+    max-width: 1540px !important;
+    padding-top: 1.35rem !important;
+    padding-bottom: 4rem !important;
+}
+
+/* Main typography */
+h1, h2, h3, h4, h5, h6,
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3 {
+    color: var(--rs-text) !important;
+    letter-spacing: -.025em;
+}
+
+p, label, span, div, small,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stCaptionContainer"] {
+    color: inherit;
+}
+
+[data-testid="stCaptionContainer"], .stCaption, small {
+    color: var(--rs-muted) !important;
+}
+
+a { color: var(--rs-primary) !important; }
+a:hover { color: var(--rs-primary-hover) !important; }
+
+/* Hero */
+.rs-hero {
+    position: relative;
+    overflow: hidden;
+    margin: .15rem 0 1.05rem 0;
+    padding: 1.45rem 1.65rem 1.35rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 22px;
+    background:
+        radial-gradient(circle at 84% 8%, rgba(81, 151, 112, .15), transparent 30%),
+        linear-gradient(135deg, rgba(248, 251, 249, .97), rgba(233, 241, 236, .94));
+    box-shadow: var(--rs-shadow-soft);
+}
+.rs-hero::after {
+    content: "";
+    position: absolute;
+    inset: auto -28px -54px auto;
+    width: 180px;
+    height: 180px;
+    border-radius: 999px;
+    border: 1px solid rgba(45, 123, 87, .10);
+    box-shadow: 0 0 0 22px rgba(45, 123, 87, .025), 0 0 0 45px rgba(45, 123, 87, .018);
+}
+.rs-eyebrow {
+    color: var(--rs-primary);
+    font-size: .68rem;
+    font-weight: 850;
+    letter-spacing: .15em;
+    text-transform: uppercase;
+}
+.rs-hero h1 {
+    margin: .33rem 0 .38rem;
+    font-size: clamp(1.7rem, 2.2vw, 2.5rem);
+    line-height: 1.05;
+    font-weight: 790;
+}
+.rs-hero p {
+    max-width: 780px;
+    margin: 0;
+    color: var(--rs-muted) !important;
+    font-size: .95rem;
+    line-height: 1.55;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(248, 251, 249, .985), rgba(236, 243, 239, .985)) !important;
+    border-right: 1px solid var(--rs-border) !important;
+    box-shadow: 12px 0 32px rgba(37, 76, 58, .045);
+}
+section[data-testid="stSidebar"] > div {
+    background: transparent !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+    padding-top: 1rem !important;
+}
+.rs-sidebrand {
+    margin: .1rem 0 .8rem;
+    padding: 1rem 1rem .9rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, .47);
+    box-shadow: 0 7px 20px rgba(37, 76, 58, .055);
+}
+.rs-sidebrand .kicker {
+    color: var(--rs-primary);
+    font-size: .63rem;
+    font-weight: 850;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+}
+.rs-sidebrand .name {
+    margin-top: .3rem;
+    color: var(--rs-text);
+    font-size: 1.15rem;
+    font-weight: 780;
+}
+.rs-sidebrand .meta {
+    margin-top: .18rem;
+    color: var(--rs-muted);
+    font-size: .73rem;
+}
+
+/* Inputs, dropdowns, date pickers, text areas */
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-baseweb="input"] > div,
+[data-baseweb="select"] > div,
+[data-baseweb="base-input"],
+.stTextInput input,
+.stTextArea textarea {
+    color: var(--rs-text) !important;
+    background: var(--rs-surface-2) !important;
+    border-color: var(--rs-border-strong) !important;
+    border-radius: var(--rs-radius-sm) !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus,
+[data-testid="stDateInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus,
+[data-baseweb="select"] > div:focus-within,
+[data-baseweb="input"] > div:focus-within {
+    border-color: var(--rs-primary) !important;
+    box-shadow: 0 0 0 3px var(--rs-primary-soft) !important;
+}
+
+input:disabled, textarea:disabled,
+[data-testid="stTextInput"] input:disabled,
+[data-testid="stTextArea"] textarea:disabled {
+    color: #5D7469 !important;
+    -webkit-text-fill-color: #5D7469 !important;
+    opacity: 1 !important;
+    background: #E4EBE7 !important;
+}
+
+::placeholder {
+    color: var(--rs-faint) !important;
+    opacity: 1 !important;
+}
+
+/* BaseWeb dropdown portal, calendar and menus */
+[data-baseweb="popover"],
+[data-baseweb="menu"],
+[data-baseweb="select"] ul,
+[role="listbox"] {
+    background: #F5F8F6 !important;
+    color: var(--rs-text) !important;
+    border: 1px solid var(--rs-border-strong) !important;
+    border-radius: 12px !important;
+    box-shadow: var(--rs-shadow) !important;
+}
+[role="option"], [data-baseweb="menu"] li {
+    color: var(--rs-text) !important;
+    background: transparent !important;
+}
+[role="option"]:hover,
+[role="option"][aria-selected="true"],
+[data-baseweb="menu"] li:hover {
+    color: #17372B !important;
+    background: #DCE9E1 !important;
+}
+
+[data-baseweb="calendar"] {
+    background: #F5F8F6 !important;
+    color: var(--rs-text) !important;
+}
+[data-baseweb="calendar"] button {
+    color: var(--rs-text) !important;
+}
+[data-baseweb="calendar"] [aria-selected="true"] {
+    background: var(--rs-primary) !important;
+    color: white !important;
+}
+
+/* Buttons */
+.stButton > button,
+.stDownloadButton > button,
+[data-testid="stFormSubmitButton"] > button,
+button[kind="secondary"] {
+    min-height: 2.55rem;
+    border: 1px solid var(--rs-border-strong) !important;
+    border-radius: 11px !important;
+    background: linear-gradient(180deg, #F7FAF8, #E9F0EC) !important;
+    color: var(--rs-text) !important;
+    font-weight: 760 !important;
+    box-shadow: 0 5px 14px rgba(37, 76, 58, .065) !important;
+    transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover,
+button[kind="secondary"]:hover {
+    border-color: rgba(45, 123, 87, .38) !important;
+    background: #E0EBE4 !important;
+    color: var(--rs-primary-hover) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(37, 76, 58, .10) !important;
+}
+.stButton > button[kind="primary"],
+[data-testid="stFormSubmitButton"] > button[kind="primary"],
+button[kind="primary"] {
+    border-color: #2D7B57 !important;
+    background: linear-gradient(135deg, #2D7B57, #236445) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    box-shadow: 0 9px 22px rgba(45, 123, 87, .22) !important;
+}
+.stButton > button[kind="primary"] *,
+[data-testid="stFormSubmitButton"] > button[kind="primary"] *,
+button[kind="primary"] * {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+}
+.stButton > button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover,
+button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #286F4F, #1F5A3E) !important;
+    color: #FFFFFF !important;
+}
+
+/* Toggle / checkbox / slider */
+[data-testid="stCheckbox"] label p {
+    color: var(--rs-text) !important;
+    font-size: .94rem !important;
+    font-weight: 650 !important;
+    line-height: 1.38 !important;
+}
+[data-testid="stCheckbox"] label { gap: .45rem !important; }
+[data-testid="stCheckbox"] input { accent-color: var(--rs-primary) !important; }
+[data-baseweb="checkbox"] > div:first-child {
+    border-color: var(--rs-border-strong) !important;
+}
+[data-testid="stSlider"] [role="slider"] {
+    background: var(--rs-primary) !important;
+    border-color: var(--rs-primary) !important;
+}
+[data-testid="stSlider"] div[data-baseweb="slider"] > div > div {
+    background: rgba(45, 123, 87, .22) !important;
+}
+
+/* Forms / expanders / cards */
+[data-testid="stForm"] {
+    border: 1px solid var(--rs-border) !important;
+    border-radius: var(--rs-radius-lg) !important;
+    background: rgba(243, 246, 244, .94) !important;
+    box-shadow: var(--rs-shadow-soft) !important;
+}
+[data-testid="stExpander"] {
+    overflow: hidden;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: var(--rs-radius) !important;
+    background: rgba(243, 246, 244, .78) !important;
+    box-shadow: none !important;
+}
+[data-testid="stExpander"] summary:hover {
+    background: var(--rs-hover) !important;
+}
+hr {
+    border-color: rgba(50, 91, 72, .12) !important;
+}
+
+/* Status messages */
+[data-testid="stAlert"] {
+    border-radius: var(--rs-radius) !important;
+    border-width: 1px !important;
+    box-shadow: none !important;
+}
+[data-testid="stAlert"] p { color: var(--rs-text) !important; }
+.stSuccess, [data-testid="stAlert"]:has([data-testid="stNotificationContentSuccess"]) {
+    background: rgba(47, 143, 97, .09) !important;
+    border-color: rgba(47, 143, 97, .24) !important;
+}
+.stWarning, [data-testid="stAlert"]:has([data-testid="stNotificationContentWarning"]) {
+    background: rgba(184, 121, 39, .10) !important;
+    border-color: rgba(184, 121, 39, .24) !important;
+}
+.stError, [data-testid="stAlert"]:has([data-testid="stNotificationContentError"]) {
+    background: rgba(197, 82, 102, .09) !important;
+    border-color: rgba(197, 82, 102, .24) !important;
+}
+
+/* Metrics and technical summary */
+[data-testid="stMetric"] {
+    padding: .82rem .95rem !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 14px !important;
+    background: rgba(243, 246, 244, .92) !important;
+    box-shadow: 0 5px 15px rgba(37, 76, 58, .045) !important;
+}
+[data-testid="stMetricLabel"] { color: var(--rs-muted) !important; }
+[data-testid="stMetricValue"] { color: var(--rs-text) !important; font-weight: 780 !important; }
+
+.rs-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .72rem;
+    margin: .15rem 0 .95rem;
+}
+.rs-summary-card {
+    min-width: 0;
+    padding: .86rem .95rem .82rem;
+    border: 1px solid var(--rs-border);
+    border-radius: 14px;
+    background: rgba(243, 246, 244, .91);
+    box-shadow: 0 5px 15px rgba(37, 76, 58, .045);
+}
+.rs-summary-card .label {
+    color: var(--rs-muted);
+    font-size: .69rem;
+    font-weight: 780;
+    letter-spacing: .055em;
+    text-transform: uppercase;
+}
+.rs-summary-card .value {
+    margin-top: .26rem;
+    color: var(--rs-text);
+    font-size: 1.15rem;
+    font-weight: 790;
+    line-height: 1.15;
+}
+.rs-summary-card .foot {
+    margin-top: .2rem;
+    color: var(--rs-muted);
+    font-size: .72rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Dataframe shell */
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+    overflow: hidden;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 14px !important;
+    background: #F2F5F3 !important;
+    box-shadow: var(--rs-shadow-soft) !important;
+}
+[data-testid="stDataFrame"] iframe,
+[data-testid="stDataFrame"] canvas {
+    border-radius: 12px !important;
+}
+
+/* Code, JSON and URL detail */
+[data-testid="stCodeBlock"], pre, code {
+    color: #254238 !important;
+    background: #E8EFEB !important;
+    border-color: var(--rs-border) !important;
+}
+
+/* Spinner */
+[data-testid="stSpinner"] > div { border-top-color: var(--rs-primary) !important; }
+
+/* Scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(45, 123, 87, .26);
+    background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(45, 123, 87, .42); background-clip: padding-box; }
+
+/* Tighten section rhythm */
+[data-testid="stVerticalBlock"] > div:has(> [data-testid="stHeadingWithActionElements"]) {
+    margin-top: .2rem;
+}
+
+@media (max-width: 900px) {
+    .rs-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stMainBlockContainer, section.main > div.block-container {
+        padding-left: .85rem !important;
+        padding-right: .85rem !important;
     }
-    div[data-testid="stCheckbox"] label {
-        align-items: flex-start !important;
-        gap: 0.45rem !important;
-    }
-    div[data-testid="stCheckbox"] {
-        margin-bottom: 0.25rem !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+    .rs-hero { padding: 1.15rem 1.15rem 1.05rem; border-radius: 17px; }
+}
+</style>
+"""
+
+st.markdown(STREAMLIT_SAGE_CSS, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -368,9 +794,9 @@ def render_auth_token_saver_and_reload(token: str) -> None:
         <div style="
             padding: 10px 12px;
             border-radius: 8px;
-            border: 1px solid #d8ead8;
-            background: #f3fbf3;
-            color: #1d5f1d;
+            border: 1px solid rgba(45,123,87,.24);
+            background: #E7F0EA;
+            color: #235B42;
             font-weight: 700;
             font-family: sans-serif;
         ">
@@ -437,9 +863,9 @@ def render_local_storage_saver(opening: str, ending: str, rates_include_tax: boo
         <div style="
             padding: 10px 12px;
             border-radius: 8px;
-            border: 1px solid #d8ead8;
-            background: #f3fbf3;
-            color: #1d5f1d;
+            border: 1px solid rgba(45,123,87,.24);
+            background: #E7F0EA;
+            color: #235B42;
             font-weight: 700;
             font-family: sans-serif;
         ">
@@ -1919,6 +2345,35 @@ def build_output_dataframe(rooms: List[Dict], discount_percent: float) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def style_output_dataframe(df: pd.DataFrame):
+    """Apply the shared sage commercial palette to Streamlit's structured rate table."""
+    if df is None or df.empty:
+        return df
+    return (
+        df.style
+        .set_properties(**{
+            "background-color": "#F2F5F3",
+            "color": "#294239",
+            "border-color": "#D5E0D9",
+        })
+        .set_table_styles([
+            {
+                "selector": "th",
+                "props": [
+                    ("background-color", "#D9E7DE"),
+                    ("color", "#274A3B"),
+                    ("font-weight", "750"),
+                    ("border-color", "#C8D8CE"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [("border-color", "#D5E0D9")],
+            },
+        ])
+    )
+
+
 def get_room_selection_key(index: int, room: Dict) -> str:
     return f"room_selected_{index}_{normalize_room_name(room['room_name']).lower()}"
 
@@ -2000,11 +2455,12 @@ def render_copy_button(text_to_copy: str) -> None:
                 style="
                     width:100%;
                     height:38px;
-                    border:1px solid #c9c9c9;
-                    border-radius:0.5rem;
-                    background:#ffffff;
-                    color:#262730;
-                    font-weight:700;
+                    border:1px solid rgba(50,91,72,.26);
+                    border-radius:11px;
+                    background:linear-gradient(180deg,#F7FAF8,#E9F0EC);
+                    color:#18352B;
+                    font-weight:760;
+                    box-shadow:0 5px 14px rgba(37,76,58,.065);
                     cursor:pointer;
                 "
                 onclick="
@@ -2037,25 +2493,29 @@ def render_copy_button(text_to_copy: str) -> None:
 # ============================================================
 # UI
 # ============================================================
-st.title("🏨 Starwood Hotel Rateshop")
-st.caption("Secure Streamlit Secrets login, hotel-code dropdown, dynamic date-based URL, selectable room quotes, and email-ready output.")
-
 st.markdown(
     """
-    <style>
-    div[data-testid="stCheckbox"] label p {
-        font-size: 1.04rem !important;
-        font-weight: 700 !important;
-        line-height: 1.35 !important;
-    }
-    </style>
+    <div class="rs-hero">
+      <div class="rs-eyebrow">Commercial Intelligence · Live Pricing</div>
+      <h1>Rate Shop</h1>
+      <p>Search live room inventory, shape a competitive offer, and turn selected room types into a client-ready quote from one focused workspace.</p>
+    </div>
     """,
     unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.header("⚙️ Search Settings")
-    st.caption(f"App version: {APP_VERSION}")
+    st.markdown(
+        f"""
+        <div class="rs-sidebrand">
+          <div class="kicker">Commercial Tools</div>
+          <div class="name">Rate Shop</div>
+          <div class="meta">Live pricing workspace · {html.escape(APP_VERSION)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("#### Search Settings")
 
     if st.button("LOGOUT"):
         st.session_state.authenticated = False
@@ -2065,39 +2525,40 @@ with st.sidebar:
         st.stop()
 
     hotel_key = st.selectbox(
-        "Hotel dropdown menu",
+        "Hotel",
         options=list(HOTEL_CODE_MAP.keys()),
         index=list(HOTEL_CODE_MAP.keys()).index(DEFAULT_HOTEL_KEY),
     )
     hotel_code = get_hotel_code(hotel_key)
     hotel_provider = get_hotel_provider(hotel_key)
     selected_currency_symbol = get_hotel_currency_symbol(hotel_key)
-    st.text_input("Hotel code", value=hotel_code, disabled=True)
-    st.text_input("Booking provider", value=hotel_provider, disabled=True)
-    st.text_input("Currency symbol", value=selected_currency_symbol, disabled=True)
 
-    checkin = st.date_input("Check-in / startDate", value=DEFAULT_CHECKIN)
+    checkin = st.date_input("Check-in", value=DEFAULT_CHECKIN)
     default_checkout = max(DEFAULT_CHECKOUT, checkin + timedelta(days=1))
-    checkout = st.date_input("Check-out / endDate", value=default_checkout)
+    checkout = st.date_input("Check-out", value=default_checkout)
 
     adults = st.number_input("Adults", min_value=1, max_value=10, value=1, step=1)
     children = st.number_input("Children", min_value=0, max_value=10, value=0, step=1)
     discount_percent = st.number_input(
-        "% OFF",
+        "Offer discount %",
         min_value=0.0,
         max_value=100.0,
         value=float(DEFAULT_DISCOUNT_PERCENT),
         step=1.0,
     )
-    search_clicked = st.button("SEARCH", type="primary", use_container_width=True)
-    st.checkbox("Rates include tax in email quote", key="rates_include_tax")
-    currency = st.selectbox("Currency", options=["USD"], index=0)
-    sort = st.selectbox("Sort", options=["low", "high"], index=0)
-    group_code = st.text_input("Group Code", value="")
-    promo_code = st.text_input("Promo Code", value="")
-    wait_seconds = st.slider("Page open timeout seconds", 8, 20, 10, 1)
+    st.checkbox("Rates include tax in client email", key="rates_include_tax")
 
-    with st.expander("Chrome runtime check", expanded=False):
+    with st.expander("Advanced search options", expanded=False):
+        st.caption(f"Hotel code {hotel_code} · {hotel_provider} · display {selected_currency_symbol}")
+        currency = st.selectbox("Booking currency", options=["USD"], index=0)
+        sort = st.selectbox("Rate sort", options=["low", "high"], index=0)
+        group_code = st.text_input("Group code", value="")
+        promo_code = st.text_input("Promo code", value="")
+        wait_seconds = st.slider("Search timeout seconds", 8, 20, 10, 1)
+
+    search_clicked = st.button("SEARCH LIVE RATES", type="primary", use_container_width=True)
+
+    with st.expander("Browser runtime", expanded=False):
         runtime = get_chrome_runtime()
         st.write("Chromium:", runtime.get("chromium_binary") or "not found")
         st.write("Chromedriver:", runtime.get("chromedriver_binary") or "not found")
@@ -2121,7 +2582,38 @@ target_url = build_booking_url(
     sort=sort,
 )
 
-st.text_area("Dynamic URL", value=target_url, height=88, disabled=True)
+stay_nights = max((checkout - checkin).days, 1)
+party_size = int(adults) + int(children)
+st.markdown(
+    f"""
+    <div class="rs-summary-grid">
+      <div class="rs-summary-card">
+        <div class="label">Hotel</div>
+        <div class="value">{html.escape(hotel_key)}</div>
+        <div class="foot">{html.escape(hotel_provider.title())} · code {html.escape(hotel_code)}</div>
+      </div>
+      <div class="rs-summary-card">
+        <div class="label">Stay</div>
+        <div class="value">{stay_nights} night{'s' if stay_nights != 1 else ''}</div>
+        <div class="foot">{checkin.isoformat()} → {checkout.isoformat()}</div>
+      </div>
+      <div class="rs-summary-card">
+        <div class="label">Guests</div>
+        <div class="value">{party_size}</div>
+        <div class="foot">{int(adults)} adult · {int(children)} child</div>
+      </div>
+      <div class="rs-summary-card">
+        <div class="label">Offer</div>
+        <div class="value">{float(discount_percent):g}% off</div>
+        <div class="foot">Display currency {html.escape(selected_currency_symbol)}</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.expander("Booking URL & technical details", expanded=False):
+    st.code(target_url, language=None)
 
 email_clicked = False
 
@@ -2210,7 +2702,7 @@ if search_clicked:
                 "Streamlit is still running an older app.py, or the app was not rebooted successfully."
             )
 
-st.subheader("Room Type Selection")
+st.subheader("Room Selection & Offer Builder")
 rooms_for_selection = st.session_state.last_rooms
 if rooms_for_selection:
     st.caption("Select the room type(s) you want to include in the email quote.")
@@ -2304,9 +2796,9 @@ with copy_button_col:
     render_copy_button(st.session_state.generated_email)
 
 st.divider()
-st.subheader("Structured Result")
+st.subheader("Structured Rate Result")
 if not st.session_state.last_df.empty:
-    st.dataframe(st.session_state.last_df, use_container_width=True, hide_index=True)
+    st.dataframe(style_output_dataframe(st.session_state.last_df), use_container_width=True, hide_index=True)
     csv_data = st.session_state.last_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         label="Download CSV",
