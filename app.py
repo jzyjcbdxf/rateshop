@@ -30,7 +30,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-14 Starwood Hotel Rateshop sage-commercial-ui-v1"
+APP_VERSION = "2026-08-14 Starwood Hotel Rateshop sage-commercial-ui-v2-light-controls"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -548,6 +548,202 @@ hr {
 /* Tighten section rhythm */
 [data-testid="stVerticalBlock"] > div:has(> [data-testid="stHeadingWithActionElements"]) {
     margin-top: .2rem;
+}
+
+
+/* ==========================================================
+   HARD LIGHT-CONTROL GUARD
+   Streamlit/BaseWeb can render portal widgets outside the normal app tree.
+   These rules deliberately remove browser/dark-theme black surfaces from
+   Selectbox, DateInput calendar, NumberInput steppers and menu portals.
+   ========================================================== */
+:root,
+html,
+body,
+.stApp,
+[data-testid="stAppViewContainer"] {
+    color-scheme: light only !important;
+    --primary-color: #2D7B57 !important;
+    --background-color: #E7ECE9 !important;
+    --secondary-background-color: #F2F5F3 !important;
+    --text-color: #18352B !important;
+}
+
+/* Selectbox: never allow the BaseWeb dark shell to leak through. */
+[data-testid="stSelectbox"],
+[data-testid="stSelectbox"] > div,
+[data-testid="stSelectbox"] [data-baseweb="select"],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stSelectbox"] [data-baseweb="value-container"],
+[data-testid="stSelectbox"] [data-baseweb="select"] input,
+[data-testid="stSelectbox"] [role="combobox"] {
+    background-color: #F5F8F6 !important;
+    color: #18352B !important;
+    -webkit-text-fill-color: #18352B !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+    border-color: #B9CBC1 !important;
+    box-shadow: none !important;
+}
+[data-testid="stSelectbox"] svg,
+[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+    color: #49685A !important;
+    fill: #49685A !important;
+}
+
+/* Dropdown/menu portals are attached near <body>, outside the sidebar. */
+body > div[data-baseweb="popover"],
+body > div[data-baseweb="popover"] > div,
+[data-baseweb="popover"],
+[data-baseweb="popover"] > div,
+[data-baseweb="menu"],
+[data-baseweb="menu"] > div,
+ul[role="listbox"],
+[role="listbox"] {
+    background-color: #F8FAF9 !important;
+    color: #18352B !important;
+    border-color: #B9CBC1 !important;
+}
+[role="option"],
+[role="option"] *,
+[data-baseweb="menu"] li,
+[data-baseweb="menu"] li * {
+    color: #29483B !important;
+    -webkit-text-fill-color: #29483B !important;
+    background-color: transparent !important;
+}
+[role="option"]:hover,
+[role="option"][aria-selected="true"],
+[data-baseweb="menu"] li:hover {
+    background-color: #E0ECE5 !important;
+    color: #17372B !important;
+}
+
+/* Date input itself. */
+[data-testid="stDateInput"],
+[data-testid="stDateInput"] > div,
+[data-testid="stDateInput"] [data-baseweb="input"],
+[data-testid="stDateInput"] [data-baseweb="input"] > div,
+[data-testid="stDateInput"] [data-baseweb="base-input"],
+[data-testid="stDateInput"] input {
+    background-color: #F5F8F6 !important;
+    color: #18352B !important;
+    -webkit-text-fill-color: #18352B !important;
+}
+[data-testid="stDateInput"] svg {
+    color: #49685A !important;
+    fill: #49685A !important;
+}
+[data-testid="stDateInput"] [data-baseweb="input"] > div,
+[data-testid="stDateInput"] [data-baseweb="base-input"] {
+    border-color: #B9CBC1 !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+[data-testid="stDateInput"]:focus-within [data-baseweb="input"] > div,
+[data-testid="stDateInput"]:focus-within [data-baseweb="base-input"],
+[data-testid="stDateInput"] [data-baseweb="input"] > div:focus-within {
+    border-color: #2D7B57 !important;
+    outline: none !important;
+    box-shadow: 0 0 0 3px rgba(45, 123, 87, .11) !important;
+}
+
+/* Calendar: flatten all dark internal wrappers to one clean light surface. */
+[data-baseweb="calendar"],
+[data-baseweb="calendar"] > div,
+[data-baseweb="calendar"] > div > div,
+[data-baseweb="calendar"] [role="grid"],
+[data-baseweb="calendar"] [role="row"],
+[data-baseweb="calendar"] [role="columnheader"],
+[data-baseweb="calendar"] [role="gridcell"] {
+    background-color: #F8FAF9 !important;
+    color: #29483B !important;
+    border-color: #D4DFD9 !important;
+}
+[data-baseweb="calendar"] div {
+    color: #29483B !important;
+}
+[data-baseweb="calendar"] [role="columnheader"],
+[data-baseweb="calendar"] [role="columnheader"] * {
+    color: #6A7F75 !important;
+}
+[data-baseweb="calendar"] button,
+[data-baseweb="calendar"] button * {
+    color: #29483B !important;
+    -webkit-text-fill-color: #29483B !important;
+}
+[data-baseweb="calendar"] button {
+    background-color: transparent !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+[data-baseweb="calendar"] button:hover:not(:disabled) {
+    background-color: #E3EEE7 !important;
+    color: #17372B !important;
+}
+[data-baseweb="calendar"] button:disabled,
+[data-baseweb="calendar"] button:disabled * {
+    background-color: transparent !important;
+    color: #A2B1A9 !important;
+    -webkit-text-fill-color: #A2B1A9 !important;
+    opacity: .62 !important;
+}
+[data-baseweb="calendar"] [aria-selected="true"],
+[data-baseweb="calendar"] [aria-selected="true"] *,
+[data-baseweb="calendar"] [aria-current="date"],
+[data-baseweb="calendar"] [aria-current="date"] * {
+    background-color: #2D7B57 !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border-color: #2D7B57 !important;
+}
+/* The month/year header can be a nested select; keep it light as well. */
+[data-baseweb="calendar"] [data-baseweb="select"],
+[data-baseweb="calendar"] [data-baseweb="select"] > div,
+[data-baseweb="calendar"] [role="combobox"] {
+    background-color: #EEF4F0 !important;
+    color: #29483B !important;
+    border-color: #C5D4CC !important;
+}
+[data-baseweb="calendar"] svg {
+    color: #49685A !important;
+    fill: #49685A !important;
+}
+
+/* Number-input steppers. Streamlit may render these with palette colors from
+   the active theme. Keep both + and - neutral Sage, including hover/focus. */
+[data-testid="stNumberInput"] button,
+[data-testid="stNumberInput"] button:hover,
+[data-testid="stNumberInput"] button:focus,
+[data-testid="stNumberInput"] button:active {
+    background-color: #E8F0EB !important;
+    color: #315546 !important;
+    -webkit-text-fill-color: #315546 !important;
+    border-color: #C3D2CA !important;
+    box-shadow: none !important;
+}
+[data-testid="stNumberInput"] button svg {
+    color: #315546 !important;
+    fill: #315546 !important;
+}
+
+/* Checkbox box should stay Sage/neutral instead of charcoal. */
+[data-testid="stCheckbox"] [data-baseweb="checkbox"] > div:first-child {
+    background-color: #F8FAF9 !important;
+    border-color: #AFC3B8 !important;
+}
+[data-testid="stCheckbox"] input:checked + div,
+[data-testid="stCheckbox"] [aria-checked="true"] > div:first-child {
+    background-color: #2D7B57 !important;
+    border-color: #2D7B57 !important;
+}
+
+/* Last-resort protection for native form widgets under a dark OS preference. */
+input,
+textarea,
+select,
+button {
+    color-scheme: light !important;
 }
 
 @media (max-width: 900px) {
