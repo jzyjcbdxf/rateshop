@@ -754,10 +754,314 @@ button {
     }
     .rs-hero { padding: 1.15rem 1.15rem 1.05rem; border-radius: 17px; }
 }
+
+/* ==========================================================
+   FINAL PORTAL OVERRIDES
+   BaseWeb mounts select menus and the date picker in a portal under <body>.
+   Some Streamlit builds also put charcoal fills on nested anonymous wrappers,
+   so the selectors below intentionally flatten every nested portal surface.
+   ========================================================== */
+body [data-baseweb="popover"],
+body [data-baseweb="popover"] > div,
+body [data-baseweb="popover"] > div > div,
+body [data-baseweb="popover"] section,
+body [data-baseweb="popover"] ul,
+body [data-baseweb="popover"] li {
+    color-scheme: light !important;
+    background: #F7FAF8 !important;
+    background-color: #F7FAF8 !important;
+    color: #1D3A2F !important;
+    border-color: #C3D2CA !important;
+}
+
+/* Hotel select: the arrow area is an anonymous child wrapper in current Streamlit. */
+[data-testid="stSelectbox"] [data-baseweb="select"],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+    background: #F5F8F6 !important;
+    background-color: #F5F8F6 !important;
+    color: #18352B !important;
+    border-color: #AFC3B8 !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div > div > div,
+[data-testid="stSelectbox"] [data-baseweb="value-container"] {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #18352B !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] svg,
+[data-testid="stSelectbox"] [role="combobox"] svg {
+    color: #49685A !important;
+    fill: #49685A !important;
+}
+
+/* Date input shell: remove Streamlit theme error/red focus rings. */
+[data-testid="stDateInput"],
+[data-testid="stDateInput"] > div,
+[data-testid="stDateInput"] [data-baseweb="input"],
+[data-testid="stDateInput"] [data-baseweb="input"] > div,
+[data-testid="stDateInput"] [data-baseweb="base-input"],
+[data-testid="stDateInput"] [data-baseweb="base-input"] > div {
+    background: #F5F8F6 !important;
+    background-color: #F5F8F6 !important;
+    border-color: #AFC3B8 !important;
+    outline-color: transparent !important;
+    box-shadow: none !important;
+}
+[data-testid="stDateInput"]:focus-within,
+[data-testid="stDateInput"]:focus-within > div,
+[data-testid="stDateInput"]:focus-within [data-baseweb="input"],
+[data-testid="stDateInput"]:focus-within [data-baseweb="input"] > div,
+[data-testid="stDateInput"]:focus-within [data-baseweb="base-input"] {
+    border-color: #2D7B57 !important;
+    outline: 0 !important;
+    box-shadow: 0 0 0 3px rgba(45, 123, 87, .10) !important;
+}
+
+/* Calendar: flatten every anonymous wrapper so no charcoal rectangles survive. */
+body [data-baseweb="popover"] [data-baseweb="calendar"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] > div,
+body [data-baseweb="popover"] [data-baseweb="calendar"] div,
+body [data-baseweb="popover"] [data-baseweb="calendar"] section,
+body [data-baseweb="popover"] [data-baseweb="calendar"] header,
+body [data-baseweb="popover"] [data-baseweb="calendar"] table,
+body [data-baseweb="popover"] [data-baseweb="calendar"] thead,
+body [data-baseweb="popover"] [data-baseweb="calendar"] tbody,
+body [data-baseweb="popover"] [data-baseweb="calendar"] tr,
+body [data-baseweb="popover"] [data-baseweb="calendar"] th,
+body [data-baseweb="popover"] [data-baseweb="calendar"] td,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [role="grid"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [role="row"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [role="gridcell"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [role="columnheader"] {
+    color-scheme: light !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #29483B !important;
+    border-color: #D4DFD9 !important;
+    box-shadow: none !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] {
+    background: #F7FAF8 !important;
+    background-color: #F7FAF8 !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] button,
+body [data-baseweb="popover"] [data-baseweb="calendar"] button * {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #29483B !important;
+    -webkit-text-fill-color: #29483B !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] button:hover:not(:disabled) {
+    background: #E1ECE5 !important;
+    background-color: #E1ECE5 !important;
+    color: #17372B !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-selected="true"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-selected="true"] *,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-current="date"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-current="date"] * {
+    background: #2D7B57 !important;
+    background-color: #2D7B57 !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border-color: #2D7B57 !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-selected="true"]::before,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-selected="true"]::after,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-current="date"]::before,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [aria-current="date"]::after {
+    background: #2D7B57 !important;
+    background-color: #2D7B57 !important;
+}
+body [data-baseweb="popover"] [data-baseweb="calendar"] button:disabled,
+body [data-baseweb="popover"] [data-baseweb="calendar"] button:disabled * {
+    background: transparent !important;
+    color: #A1B0A8 !important;
+    -webkit-text-fill-color: #A1B0A8 !important;
+}
+
+/* Month / year selector inside the calendar. */
+body [data-baseweb="popover"] [data-baseweb="calendar"] [data-baseweb="select"],
+body [data-baseweb="popover"] [data-baseweb="calendar"] [data-baseweb="select"] > div,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [data-baseweb="select"] > div > div,
+body [data-baseweb="popover"] [data-baseweb="calendar"] [role="combobox"] {
+    background: #EEF4F0 !important;
+    background-color: #EEF4F0 !important;
+    color: #29483B !important;
+    border-color: #C3D2CA !important;
+}
 </style>
 """
 
 st.markdown(STREAMLIT_SAGE_CSS, unsafe_allow_html=True)
+
+
+
+def render_portal_light_guard() -> None:
+    """Force BaseWeb portal widgets to stay on the app's light Sage palette.
+
+    Streamlit mounts select menus and calendars outside the normal app subtree.
+    On some Streamlit/BaseWeb releases, anonymous wrappers carry inline dark
+    backgrounds that are more specific than application CSS. This lightweight
+    MutationObserver restyles only those portal controls after they are mounted.
+    """
+    components.html(
+        r"""
+        <script>
+        (() => {
+          const doc = window.parent && window.parent.document ? window.parent.document : document;
+          const COLORS = {
+            surface: '#F7FAF8',
+            field: '#F5F8F6',
+            soft: '#EEF4F0',
+            hover: '#E1ECE5',
+            border: '#B9CBC1',
+            text: '#18352B',
+            muted: '#49685A',
+            disabled: '#A1B0A8',
+            primary: '#2D7B57',
+            white: '#FFFFFF'
+          };
+
+          const setImportant = (el, prop, value) => {
+            if (el && el.style) el.style.setProperty(prop, value, 'important');
+          };
+          const paint = (el, bg, color = COLORS.text) => {
+            if (!el || !el.style) return;
+            setImportant(el, 'color-scheme', 'light');
+            setImportant(el, 'background', bg);
+            setImportant(el, 'background-color', bg);
+            setImportant(el, 'color', color);
+            setImportant(el, '-webkit-text-fill-color', color);
+          };
+
+          function styleSelectboxes() {
+            doc.querySelectorAll('[data-testid="stSelectbox"] [data-baseweb="select"]').forEach(select => {
+              paint(select, COLORS.field);
+              const shell = select.firstElementChild;
+              if (shell) {
+                paint(shell, COLORS.field);
+                setImportant(shell, 'border-color', COLORS.border);
+                setImportant(shell, 'box-shadow', 'none');
+              }
+              select.querySelectorAll('div').forEach(div => {
+                if (div !== shell) {
+                  setImportant(div, 'background', 'transparent');
+                  setImportant(div, 'background-color', 'transparent');
+                  setImportant(div, 'color', COLORS.text);
+                  setImportant(div, '-webkit-text-fill-color', COLORS.text);
+                }
+              });
+              select.querySelectorAll('svg').forEach(svg => {
+                setImportant(svg, 'color', COLORS.muted);
+                setImportant(svg, 'fill', COLORS.muted);
+              });
+            });
+          }
+
+          function styleDateInputs() {
+            doc.querySelectorAll('[data-testid="stDateInput"]').forEach(root => {
+              root.querySelectorAll('[data-baseweb="input"], [data-baseweb="base-input"]').forEach(el => {
+                paint(el, COLORS.field);
+                setImportant(el, 'border-color', COLORS.border);
+                setImportant(el, 'box-shadow', 'none');
+                setImportant(el, 'outline', 'none');
+              });
+              root.querySelectorAll('input').forEach(input => paint(input, COLORS.field));
+              root.querySelectorAll('svg').forEach(svg => {
+                setImportant(svg, 'color', COLORS.muted);
+                setImportant(svg, 'fill', COLORS.muted);
+              });
+            });
+          }
+
+          function styleCalendar(calendar) {
+            paint(calendar, COLORS.surface);
+            calendar.querySelectorAll('div, section, header, table, thead, tbody, tr, th, td').forEach(el => {
+              setImportant(el, 'background', 'transparent');
+              setImportant(el, 'background-color', 'transparent');
+              setImportant(el, 'color', COLORS.text);
+              setImportant(el, '-webkit-text-fill-color', COLORS.text);
+              setImportant(el, 'box-shadow', 'none');
+            });
+            calendar.querySelectorAll('button').forEach(button => {
+              const selected = button.getAttribute('aria-selected') === 'true' || button.getAttribute('aria-current') === 'date';
+              const disabled = button.disabled || button.getAttribute('aria-disabled') === 'true';
+              paint(button, selected ? COLORS.primary : 'transparent', selected ? COLORS.white : (disabled ? COLORS.disabled : COLORS.text));
+              setImportant(button, 'border-color', selected ? COLORS.primary : 'transparent');
+              setImportant(button, 'box-shadow', 'none');
+              button.querySelectorAll('*').forEach(child => {
+                setImportant(child, 'background', 'transparent');
+                setImportant(child, 'background-color', 'transparent');
+                setImportant(child, 'color', selected ? COLORS.white : (disabled ? COLORS.disabled : COLORS.text));
+                setImportant(child, '-webkit-text-fill-color', selected ? COLORS.white : (disabled ? COLORS.disabled : COLORS.text));
+              });
+            });
+            calendar.querySelectorAll('[aria-selected="true"], [aria-current="date"]').forEach(el => {
+              paint(el, COLORS.primary, COLORS.white);
+              setImportant(el, 'border-color', COLORS.primary);
+            });
+            calendar.querySelectorAll('[data-baseweb="select"]').forEach(select => {
+              paint(select, COLORS.soft);
+              select.querySelectorAll('div').forEach(div => {
+                setImportant(div, 'background', 'transparent');
+                setImportant(div, 'background-color', 'transparent');
+                setImportant(div, 'color', COLORS.text);
+              });
+            });
+          }
+
+          function stylePortals() {
+            doc.querySelectorAll('[data-baseweb="popover"]').forEach(popover => {
+              paint(popover, COLORS.surface);
+              setImportant(popover, 'border-color', COLORS.border);
+              popover.querySelectorAll(':scope > div, :scope > div > div').forEach(el => paint(el, COLORS.surface));
+              const calendar = popover.querySelector('[data-baseweb="calendar"]');
+              if (calendar) {
+                styleCalendar(calendar);
+              } else {
+                popover.querySelectorAll('[role="listbox"], [data-baseweb="menu"], ul').forEach(el => paint(el, COLORS.surface));
+                popover.querySelectorAll('[role="option"], li').forEach(el => {
+                  paint(el, el.getAttribute('aria-selected') === 'true' ? COLORS.hover : 'transparent', COLORS.text);
+                });
+              }
+            });
+          }
+
+          function apply() {
+            styleSelectboxes();
+            styleDateInputs();
+            stylePortals();
+          }
+
+          apply();
+          let scheduled = false;
+          const observer = new MutationObserver(() => {
+            if (scheduled) return;
+            scheduled = true;
+            window.requestAnimationFrame(() => {
+              scheduled = false;
+              apply();
+            });
+          });
+          observer.observe(doc.documentElement, {subtree: true, childList: true});
+
+          // Re-apply on pointer/focus because BaseWeb may repaint inline styles
+          // after a menu opens or a date receives focus.
+          ['pointerdown', 'focusin', 'click'].forEach(evt => {
+            doc.addEventListener(evt, () => window.setTimeout(apply, 0), true);
+          });
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+render_portal_light_guard()
 
 
 # ============================================================
