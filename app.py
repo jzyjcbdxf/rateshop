@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import hmac
 import html
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import date, timedelta
 from typing import Dict, List, Optional
@@ -30,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-14 Starwood Hotel Rateshop sage-commercial-ui-v2-light-controls"
+APP_VERSION = "2026-08-17 Starwood Hotel Rateshop cache-fastpath-v3"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -70,6 +72,12 @@ DEFAULT_CHECKOUT = date.today() + timedelta(days=1)
 DEFAULT_DISCOUNT_PERCENT = 10
 ONE_HOTELS_BOOKING_URL = "https://www.1hotels.com/book/{hotel_code}"
 BACCARAT_BOOKING_URL = "https://www.baccarathotels.com/book"
+
+# Successful live results are cached in the Streamlit server process.
+# This is deliberately short because hotel inventory/pricing is dynamic.
+DEFAULT_RATE_CACHE_MINUTES = 5
+MAX_RATE_CACHE_ENTRIES = 256
+
 
 # Keywords used only as a room-name filter.
 # The scraper scans h1/h2/h3/h4 titles and keeps titles that look like room names.
@@ -1668,6 +1676,9 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
     chrome_options.add_argument("--remote-debugging-port=0")
 
     chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    # Keep the temporary profile path attached to the Options object so the caller
+    # can delete it after driver.quit(). Chrome itself does not remove --user-data-dir.
+    setattr(chrome_options, "_starwood_user_data_dir", user_data_dir)
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -1687,6 +1698,18 @@ def build_chrome_options(chromium_binary: str, fallback_mode: bool = False) -> O
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     )
+    # The booking UI does not need hotel photography to expose room names/prices.
+    # Blocking images removes a large amount of bandwidth/decoding work while keeping
+    # JavaScript, XHR/fetch and CSS enabled. This noticeably helps long/future searches.
+    chrome_options.add_experimental_option(
+        "prefs",
+        {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.notifications": 2,
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        },
+    )
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     return chrome_options
@@ -1701,7 +1724,14 @@ def init_driver(fallback_mode: bool = False) -> webdriver.Chrome:
     # Do not call webdriver.Chrome(options=...), because that invokes Selenium Manager.
     service = Service(executable_path=chromedriver_binary)
     chrome_options = build_chrome_options(chromium_binary, fallback_mode=fallback_mode)
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    profile_dir = str(getattr(chrome_options, "_starwood_user_data_dir", "") or "")
+    try:
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    except Exception:
+        if profile_dir:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
+    setattr(driver, "_starwood_user_data_dir", profile_dir)
     # The user observed that the page shell normally loads in about 7 seconds.
     # Keep this short, then poll the DOM for prices instead of waiting for full page load.
     driver.set_page_load_timeout(12 if fallback_mode else 10)
@@ -2120,23 +2150,33 @@ def get_booking_app_state(driver: webdriver.Chrome) -> Dict[str, object]:
         return {"error": str(exc)}
 
 
-def wait_for_booking_app_ready(driver: webdriver.Chrome, max_seconds: float = 18.0) -> Dict[str, object]:
+def wait_for_booking_app_ready(
+    driver: webdriver.Chrome,
+    max_seconds: float = 14.0,
+    empty_root_grace_seconds: float = 5.0,
+) -> Dict[str, object]:
     """
-    Wait for the React booking app to hydrate, not just for <body> to exist.
+    Wait for the React/Selfbook booking app to hydrate, not merely for <body>.
 
-    The failed long-date screenshot shows <body> with an empty #root and only Chakra
-    portal/select nodes. In that state Selenium sees body_seen=True, but there is no
-    bookable room DOM to parse. This function waits for real room card titles/prices.
+    The old implementation could spend the entire long-date timeout staring at an
+    already-known empty #root before deciding to refresh. Here an empty root gets a
+    short grace period; once it is clearly stuck we return early so the caller can
+    refresh immediately instead of burning another 20-30 seconds.
     """
     start_time = time.monotonic()
     states: List[Dict[str, object]] = []
     last_state: Dict[str, object] = {}
+    empty_root_started_at: Optional[float] = None
+
+    max_seconds = max(4.0, float(max_seconds))
+    empty_root_grace_seconds = max(2.5, min(float(empty_root_grace_seconds), max_seconds))
 
     while time.monotonic() - start_time <= max_seconds:
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
+
         state = get_booking_app_state(driver)
         last_state = state
         states.append(state)
@@ -2144,27 +2184,43 @@ def wait_for_booking_app_ready(driver: webdriver.Chrome, max_seconds: float = 18
         title_count = int(state.get("titleCount", 0) or 0)
         card_count = int(state.get("cardCount", 0) or 0)
         price_found = bool(state.get("priceTextFound", False))
+        root_exists = bool(state.get("rootExists", False))
         root_child_count = int(state.get("rootChildCount", 0) or 0)
         body_text_length = int(state.get("bodyTextLength", 0) or 0)
 
         if title_count >= 1 and (card_count >= 1 or price_found):
             break
-        if root_child_count > 0 and body_text_length > 1200 and (title_count >= 1 or price_found):
+        if root_child_count > 0 and body_text_length > 900 and (title_count >= 1 or price_found):
             break
 
-        # A small scroll/clickless nudge helps Chakra carousel content mount after the app shell hydrates.
+        now = time.monotonic()
+        if root_exists and root_child_count == 0 and title_count == 0 and not price_found:
+            if empty_root_started_at is None:
+                empty_root_started_at = now
+            elif now - empty_root_started_at >= empty_root_grace_seconds:
+                # Signal the caller to refresh now. Do not spend the whole long-date
+                # timeout on a React root that has shown no sign of hydration.
+                break
+        else:
+            empty_root_started_at = None
+
         try:
             scroll_booking_page_once(driver, len(states))
         except Exception:
             pass
-        time.sleep(0.75)
+        time.sleep(0.55)
 
     return {
         "elapsed_seconds": round(time.monotonic() - start_time, 2),
         "last_state": last_state,
         "samples": states[-4:],
+        "empty_root_early_exit": bool(
+            last_state.get("rootExists", False)
+            and int(last_state.get("rootChildCount", 0) or 0) == 0
+            and int(last_state.get("titleCount", 0) or 0) == 0
+            and not bool(last_state.get("priceTextFound", False))
+        ),
     }
-
 
 def reload_if_booking_root_is_empty(driver: webdriver.Chrome, wait_seconds: int, app_ready_result: Dict[str, object]) -> Dict[str, object]:
     """Reload once when the booking app shell is stuck with an empty #root."""
@@ -2187,7 +2243,7 @@ def reload_if_booking_root_is_empty(driver: webdriver.Chrome, wait_seconds: int,
             )
         except TimeoutException:
             pass
-        retry_ready = wait_for_booking_app_ready(driver, max_seconds=max(12.0, min(float(wait_seconds), 35.0)))
+        retry_ready = wait_for_booking_app_ready(driver, max_seconds=max(8.0, min(float(wait_seconds), 16.0)), empty_root_grace_seconds=5.0)
         retry_ready["reloaded_empty_root"] = True
         return retry_ready
 
@@ -2201,14 +2257,15 @@ def count_current_context_iframes(driver: webdriver.Chrome) -> int:
         return 0
 
 
-def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth: int = 4) -> Dict[str, object]:
+def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth: int = 2) -> Dict[str, object]:
     """
-    Parse prices from the top document and nested iframes.
+    Parse prices from the current document and, only when necessary, nested iframes.
 
-    1 Hotels booking uses the Selfbook script. In headless Chrome the top page can
-    look loaded while the actual rate UI is inside an iframe or an open shadow DOM.
-    Scraping only the default document can therefore produce body_seen=True but
-    seen_price_text=False.
+    Fast path: the current Selfbook build usually renders room cards in the top
+    document. The previous code recursively scanned iframe trees up to depth 4 on
+    every poll cycle and also walked the full DOM twice per context. That cost grows
+    sharply on pages containing analytics/payment frames. We now parse once and only
+    descend into frames if the top document did not yield rooms.
     """
     raw_rooms: List[Dict] = []
     contexts_checked = 0
@@ -2216,37 +2273,53 @@ def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth:
     frame_errors: List[str] = []
     seen_price_text = False
 
-    def visit(depth: int) -> None:
+    def visit(depth: int) -> bool:
         nonlocal contexts_checked, iframe_count, seen_price_text
         contexts_checked += 1
 
+        parsed_here: List[Dict] = []
         try:
-            if current_context_has_price_text(driver):
+            parsed_here = parse_rooms_with_browser_dom(driver)
+            raw_rooms.extend(parsed_here)
+            if parsed_here:
                 seen_price_text = True
-        except Exception:
-            pass
-
-        try:
-            raw_rooms.extend(parse_rooms_with_browser_dom(driver))
         except Exception as exc:
             frame_errors.append(f"parse depth {depth}: {exc}")
 
+        # Avoid another complete shadow-DOM text walk on successful contexts.
+        if not parsed_here:
+            try:
+                if current_context_has_price_text(driver):
+                    seen_price_text = True
+            except Exception:
+                pass
+
+        if parsed_here:
+            return True
         if depth >= max_depth:
-            return
+            return False
 
         try:
             frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
         except Exception as exc:
             frame_errors.append(f"iframe lookup depth {depth}: {exc}")
-            return
+            return False
 
         iframe_count += len(frames)
+        found_in_child = False
         for index in range(len(frames)):
             try:
                 frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+                if index >= len(frames):
+                    break
                 driver.switch_to.frame(frames[index])
-                visit(depth + 1)
+                if visit(depth + 1):
+                    found_in_child = True
                 driver.switch_to.parent_frame()
+                # One successful frame is enough for the current poll. Additional
+                # room cards will be picked up on the next poll if the site changes.
+                if found_in_child:
+                    break
             except Exception as exc:
                 frame_errors.append(f"iframe depth {depth} index {index}: {exc}")
                 try:
@@ -2256,6 +2329,7 @@ def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth:
                         driver.switch_to.default_content()
                     except Exception:
                         pass
+        return found_in_child
 
     try:
         driver.switch_to.default_content()
@@ -2275,7 +2349,6 @@ def collect_rooms_from_all_browser_contexts(driver: webdriver.Chrome, max_depth:
         "frame_errors": frame_errors[:8],
         "seen_price_text": seen_price_text,
     }
-
 
 def collect_page_sources_from_all_contexts(driver: webdriver.Chrome, max_depth: int = 3) -> List[str]:
     sources: List[str] = []
@@ -2452,39 +2525,67 @@ def scroll_booking_page_once(driver: webdriver.Chrome, step_index: int) -> None:
 
 
 def warm_up_lazy_loaded_rates(driver: webdriver.Chrome) -> None:
-    """Do one quick full-page scroll sweep before parsing prices."""
-    for index in range(7):
+    """Do one compact full-page scroll sweep before parsing prices."""
+    for index in range(4):
         scroll_booking_page_once(driver, index)
-        time.sleep(0.25)
+        time.sleep(0.18)
     try:
         driver.execute_script("window.scrollTo(0, 0);")
     except Exception:
         pass
 
 
-def warm_up_lazy_loaded_rates_all_contexts(driver: webdriver.Chrome, max_depth: int = 3) -> Dict[str, object]:
-    """Scroll the top document and iframes to trigger lazy-loaded room/rate cards."""
+def warm_up_lazy_loaded_rates_all_contexts(driver: webdriver.Chrome, max_depth: int = 2) -> Dict[str, object]:
+    """Warm the top document first; touch frames only if top-level rooms are absent."""
     contexts_scrolled = 0
     frame_errors: List[str] = []
 
-    def visit(depth: int) -> None:
-        nonlocal contexts_scrolled
-        contexts_scrolled += 1
-        warm_up_lazy_loaded_rates(driver)
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
 
+    contexts_scrolled += 1
+    warm_up_lazy_loaded_rates(driver)
+
+    # Most current searches are top-document React. If rooms are already visible,
+    # recursively scrolling analytics/payment iframes is pure overhead.
+    try:
+        top_rooms = dedupe_rooms(parse_rooms_with_browser_dom(driver))
+    except Exception:
+        top_rooms = []
+
+    if top_rooms:
+        return {"contexts_scrolled": contexts_scrolled, "frame_errors": frame_errors, "top_level_fast_path": True}
+
+    def visit_frames(depth: int) -> bool:
+        nonlocal contexts_scrolled
         if depth >= max_depth:
-            return
+            return False
         try:
             frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
         except Exception as exc:
             frame_errors.append(f"iframe lookup depth {depth}: {exc}")
-            return
+            return False
 
         for index in range(len(frames)):
             try:
                 frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+                if index >= len(frames):
+                    break
                 driver.switch_to.frame(frames[index])
-                visit(depth + 1)
+                contexts_scrolled += 1
+                warm_up_lazy_loaded_rates(driver)
+                try:
+                    rooms_here = dedupe_rooms(parse_rooms_with_browser_dom(driver))
+                except Exception:
+                    rooms_here = []
+                if rooms_here:
+                    driver.switch_to.parent_frame()
+                    return True
+                if visit_frames(depth + 1):
+                    driver.switch_to.parent_frame()
+                    return True
                 driver.switch_to.parent_frame()
             except Exception as exc:
                 frame_errors.append(f"iframe scroll depth {depth} index {index}: {exc}")
@@ -2495,19 +2596,20 @@ def warm_up_lazy_loaded_rates_all_contexts(driver: webdriver.Chrome, max_depth: 
                         driver.switch_to.default_content()
                     except Exception:
                         pass
+        return False
 
+    found_in_frame = visit_frames(0)
     try:
         driver.switch_to.default_content()
     except Exception:
         pass
-    visit(0)
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
 
-    return {"contexts_scrolled": contexts_scrolled, "frame_errors": frame_errors[:8]}
-
+    return {
+        "contexts_scrolled": contexts_scrolled,
+        "frame_errors": frame_errors[:8],
+        "top_level_fast_path": False,
+        "found_in_frame": found_in_frame,
+    }
 
 def room_fingerprint(rooms: List[Dict]) -> str:
     parts = []
@@ -2519,12 +2621,9 @@ def room_fingerprint(rooms: List[Dict]) -> str:
 def poll_rooms_after_page_open(
     driver: webdriver.Chrome,
     max_seconds: float = 10.0,
-    min_seconds: float = 6.0,
+    min_seconds: float = 2.5,
 ) -> Dict[str, object]:
-    """
-    Poll the already-open booking page for live prices across top document,
-    shadow DOM, and nested iframes.
-    """
+    """Poll the open booking page, using a top-document fast path before iframe fallbacks."""
     start_time = time.monotonic()
     best_raw_rooms: List[Dict] = []
     best_rooms: List[Dict] = []
@@ -2544,10 +2643,11 @@ def poll_rooms_after_page_open(
             driver.switch_to.default_content()
         except Exception:
             pass
-        scroll_booking_page_once(driver, cycles)
-        time.sleep(0.55)
 
-        context_result = collect_rooms_from_all_browser_contexts(driver)
+        scroll_booking_page_once(driver, cycles)
+        time.sleep(0.32)
+
+        context_result = collect_rooms_from_all_browser_contexts(driver, max_depth=2)
         raw_rooms = list(context_result.get("raw_rooms", []))
         rooms = dedupe_rooms(raw_rooms)
         fingerprint = room_fingerprint(rooms)
@@ -2569,7 +2669,9 @@ def poll_rooms_after_page_open(
             stable_cycles = 0
 
         elapsed = time.monotonic() - start_time
-        if best_rooms and elapsed >= min_seconds and stable_cycles >= 5:
+        # Two stable reads are sufficient after the minimum window. The old five-cycle
+        # requirement made every successful search pay several extra full-DOM walks.
+        if best_rooms and elapsed >= min_seconds and stable_cycles >= 2:
             break
 
     try:
@@ -2624,12 +2726,22 @@ def scrape_1hotels_once(
         # Wait for the booking app itself to hydrate. A successful <body> load is not
         # enough; the failed long-date case shows an empty #root with only Chakra
         # portal/select placeholders. Reload once if the root is stuck empty.
-        app_ready_initial = wait_for_booking_app_ready(driver, max_seconds=max(10.0, min(float(wait_seconds), 35.0)))
-        app_ready_result = reload_if_booking_root_is_empty(
-            driver=driver,
-            wait_seconds=wait_seconds,
-            app_ready_result=app_ready_initial,
+        app_ready_initial = wait_for_booking_app_ready(
+            driver,
+            max_seconds=max(8.0, min(float(wait_seconds), 16.0)),
+            empty_root_grace_seconds=5.0,
         )
+        if fallback_mode:
+            # The fallback browser is already the second attempt. Do not stack another
+            # full refresh cycle inside it when #root is empty again.
+            app_ready_result = dict(app_ready_initial)
+            app_ready_result["reloaded_empty_root"] = False
+        else:
+            app_ready_result = reload_if_booking_root_is_empty(
+                driver=driver,
+                wait_seconds=wait_seconds,
+                app_ready_result=app_ready_initial,
+            )
 
         # After the page body and app shell appear, wait briefly before reading prices.
         # The rate rows are populated asynchronously after the cards render.
@@ -2642,8 +2754,8 @@ def scrape_1hotels_once(
 
         # Main mode uses the configured price polling window. Fallback gets a small
         # extra buffer because it only runs after primary returns no prices or fails.
-        effective_price_poll_seconds = max(8.0, float(price_poll_seconds)) + (4.0 if fallback_mode else 0.0)
-        minimum_price_poll_seconds = min(6.0 if not fallback_mode else 8.0, effective_price_poll_seconds)
+        effective_price_poll_seconds = max(5.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
+        minimum_price_poll_seconds = min(3.0 if not fallback_mode else 4.0, effective_price_poll_seconds)
         poll_result = poll_rooms_after_page_open(
             driver,
             max_seconds=effective_price_poll_seconds,
@@ -2687,7 +2799,12 @@ def scrape_1hotels_once(
         }
     finally:
         if driver is not None:
-            driver.quit()
+            profile_dir = str(getattr(driver, "_starwood_user_data_dir", "") or "")
+            try:
+                driver.quit()
+            finally:
+                if profile_dir:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def scrape_1hotels(
@@ -2705,11 +2822,20 @@ def scrape_1hotels(
     for attempt_index, fallback_mode in enumerate(attempts, start=1):
         mode_name = "fallback" if fallback_mode else "primary"
         try:
+            if fallback_mode:
+                attempt_wait_seconds = max(10, min(12, int(wait_seconds)))
+                attempt_settle_seconds = min(float(settle_seconds), 1.5)
+                attempt_price_poll_seconds = min(float(price_poll_seconds), 6.0)
+            else:
+                attempt_wait_seconds = int(wait_seconds)
+                attempt_settle_seconds = float(settle_seconds)
+                attempt_price_poll_seconds = float(price_poll_seconds)
+
             result = scrape_1hotels_once(
                 url=url,
-                wait_seconds=(int(wait_seconds) + 2) if fallback_mode else int(wait_seconds),
-                settle_seconds=settle_seconds,
-                price_poll_seconds=price_poll_seconds,
+                wait_seconds=attempt_wait_seconds,
+                settle_seconds=attempt_settle_seconds,
+                price_poll_seconds=attempt_price_poll_seconds,
                 fallback_mode=fallback_mode,
             )
             rooms = result.get("rooms", [])
@@ -2771,6 +2897,118 @@ def scrape_1hotels(
         "Primary search failed and fallback retry also failed. "
         f"Retry history: {history}. Last error: {last_exception}"
     ) from last_exception
+
+
+@st.cache_resource(show_spinner=False)
+def get_rate_cache_store() -> Dict[str, object]:
+    """Return the process-local successful-rate cache shared across Streamlit reruns."""
+    return {"entries": {}, "lock": threading.RLock()}
+
+
+def make_rate_cache_key(url: str) -> str:
+    """Versioned key so code deployments never reuse results from an older parser."""
+    return hashlib.sha256(f"{APP_VERSION}\0{url}".encode("utf-8")).hexdigest()
+
+
+def read_rate_cache(url: str, ttl_seconds: int) -> Optional[Dict]:
+    ttl_seconds = max(1, int(ttl_seconds))
+    store = get_rate_cache_store()
+    entries = store["entries"]
+    lock = store["lock"]
+    key = make_rate_cache_key(url)
+
+    with lock:
+        entry = entries.get(key)
+        if not isinstance(entry, dict):
+            return None
+        saved_at = float(entry.get("saved_at", 0.0) or 0.0)
+        age_seconds = max(0.0, time.time() - saved_at)
+        if age_seconds > ttl_seconds:
+            entries.pop(key, None)
+            return None
+        result = copy.deepcopy(entry.get("result"))
+
+    if not isinstance(result, dict):
+        return None
+    result["cache_status"] = "hit"
+    result["cache_age_seconds"] = round(age_seconds, 1)
+    result["cache_ttl_seconds"] = ttl_seconds
+    return result
+
+
+def write_rate_cache(url: str, result: Dict) -> None:
+    """Cache only successful results containing at least one room; never cache failures."""
+    if not isinstance(result, dict) or not result.get("rooms"):
+        return
+
+    store = get_rate_cache_store()
+    entries = store["entries"]
+    lock = store["lock"]
+    key = make_rate_cache_key(url)
+    now = time.time()
+
+    clean_result = copy.deepcopy(result)
+    clean_result.pop("cache_status", None)
+    clean_result.pop("cache_age_seconds", None)
+    clean_result.pop("cache_ttl_seconds", None)
+
+    with lock:
+        entries[key] = {"saved_at": now, "result": clean_result}
+        if len(entries) > MAX_RATE_CACHE_ENTRIES:
+            oldest_keys = sorted(
+                entries,
+                key=lambda item_key: float(entries[item_key].get("saved_at", 0.0) or 0.0),
+            )[: max(1, len(entries) - MAX_RATE_CACHE_ENTRIES)]
+            for old_key in oldest_keys:
+                entries.pop(old_key, None)
+
+
+def clear_rate_cache_for_url(url: str) -> bool:
+    store = get_rate_cache_store()
+    entries = store["entries"]
+    lock = store["lock"]
+    key = make_rate_cache_key(url)
+    with lock:
+        return entries.pop(key, None) is not None
+
+
+def scrape_1hotels_with_cache(
+    url: str,
+    wait_seconds: int = 10,
+    settle_seconds: float = 2.0,
+    price_poll_seconds: float = 8.0,
+    retry_once: bool = True,
+    cache_ttl_seconds: int = DEFAULT_RATE_CACHE_MINUTES * 60,
+    force_live_refresh: bool = False,
+) -> Dict:
+    """
+    Return a recent successful result immediately, otherwise perform a live scrape.
+
+    Cache semantics are intentionally conservative:
+    - only positive room results are cached;
+    - failures and empty parses are never cached;
+    - Force live refresh bypasses and replaces the current URL's cache entry.
+    """
+    cache_ttl_seconds = max(1, int(cache_ttl_seconds))
+
+    if not force_live_refresh:
+        cached = read_rate_cache(url, cache_ttl_seconds)
+        if cached is not None:
+            return cached
+
+    result = scrape_1hotels(
+        url=url,
+        wait_seconds=wait_seconds,
+        settle_seconds=settle_seconds,
+        price_poll_seconds=price_poll_seconds,
+        retry_once=retry_once,
+    )
+    result["cache_status"] = "live"
+    result["cache_age_seconds"] = 0.0
+    result["cache_ttl_seconds"] = cache_ttl_seconds
+    if result.get("rooms"):
+        write_rate_cache(url, result)
+    return result
 
 
 ROOM_CATEGORY_ORDER = ["Hotel Rooms", "Homes", "Connecting"]
@@ -3055,6 +3293,19 @@ with st.sidebar:
         group_code = st.text_input("Group code", value="")
         promo_code = st.text_input("Promo code", value="")
         wait_seconds = st.slider("Search timeout seconds", 8, 20, 10, 1)
+        rate_cache_minutes = st.slider(
+            "Successful-rate cache minutes",
+            min_value=1,
+            max_value=30,
+            value=DEFAULT_RATE_CACHE_MINUTES,
+            step=1,
+        )
+        force_live_refresh = st.checkbox(
+            "Force live refresh (ignore cache)",
+            value=False,
+            help="Use this when you must bypass a recent successful result and hit the booking site again.",
+        )
+        st.caption("Only successful room-rate results are cached. Empty/failed searches are never cached.")
 
     search_clicked = st.button("SEARCH LIVE RATES", type="primary", use_container_width=True)
 
@@ -3133,26 +3384,31 @@ if search_clicked:
     is_long_date_search = room_nights_for_search > 3
 
     if is_long_date_search:
-        adaptive_wait_seconds = int(min(35, max(int(wait_seconds) + 12, 24)))
-        price_settle_seconds = 6.0
-        price_poll_seconds = 22.0
+        # Long stays need a little more backend time, but should not multiply every
+        # Selenium wait into a 1-2 minute frozen-looking request.
+        adaptive_wait_seconds = int(min(18, max(int(wait_seconds) + 4, 14)))
+        price_settle_seconds = 2.0
+        price_poll_seconds = 12.0
     else:
-        adaptive_wait_seconds = int(min(20, max(int(wait_seconds), 10)))
-        price_settle_seconds = 3.0
-        price_poll_seconds = 10.0
+        adaptive_wait_seconds = int(min(16, max(int(wait_seconds), 10)))
+        price_settle_seconds = 1.5
+        price_poll_seconds = 8.0
 
+    cache_ttl_seconds = int(rate_cache_minutes) * 60
+    spinner_prefix = "Forcing live refresh" if force_live_refresh else f"Checking {int(rate_cache_minutes)}-minute cache, then live site if needed"
     with st.spinner(
-        f"Opening booking page for up to {adaptive_wait_seconds}s, waiting {price_settle_seconds:g}s for async prices, "
-        f"then scrolling and polling live prices for at least 6s / up to {price_poll_seconds:g}s. "
-        f"Fallback adds a short second attempt only if no price is found."
+        f"{spinner_prefix}. Live budget: page up to {adaptive_wait_seconds}s, "
+        f"settle {price_settle_seconds:g}s, price poll up to {price_poll_seconds:g}s."
     ):
         try:
-            result = scrape_1hotels(
+            result = scrape_1hotels_with_cache(
                 target_url,
                 wait_seconds=adaptive_wait_seconds,
                 settle_seconds=price_settle_seconds,
                 price_poll_seconds=price_poll_seconds,
                 retry_once=True,
+                cache_ttl_seconds=cache_ttl_seconds,
+                force_live_refresh=bool(force_live_refresh),
             )
             rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
             retry_history = result.get("retry_history", [])
@@ -3189,7 +3445,18 @@ if search_clicked:
                 for index, room in enumerate(rooms):
                     room_key = get_room_selection_key(index, room)
                     st.session_state[room_key] = False
-                st.success(f"Search completed: parsed {len(rooms)} room type(s).")
+                cache_status = str(result.get("cache_status") or "live")
+                if cache_status == "hit":
+                    cache_age = float(result.get("cache_age_seconds", 0.0) or 0.0)
+                    st.success(
+                        f"Loaded {len(rooms)} room type(s) from rate cache ({cache_age:.0f}s old). "
+                        "No browser was launched for this search."
+                    )
+                else:
+                    st.success(
+                        f"Live search completed: parsed {len(rooms)} room type(s). "
+                        f"Successful result cached for {int(rate_cache_minutes)} minute(s)."
+                    )
                 with st.expander("Debug: retry history", expanded=False):
                     st.json(retry_history)
         except Exception as exc:
