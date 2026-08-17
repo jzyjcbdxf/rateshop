@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-17 Starwood Hotel Rateshop cache-fastpath-v3"
+APP_VERSION = "2026-08-17 Starwood Hotel Rateshop cache-postdata-v4"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -2618,6 +2618,86 @@ def room_fingerprint(rooms: List[Dict]) -> str:
     return "|".join(sorted(parts))
 
 
+def wait_for_first_rate_data(
+    driver: webdriver.Chrome,
+    max_seconds: float = 6.0,
+) -> Dict[str, object]:
+    """
+    Wait until at least one room with a parsable live price exists.
+
+    React/Selfbook can report a hydrated page before its async rate payload has
+    painted into the room cards. We therefore do not start the final two-second
+    settle window from document.readyState, <body>, or merely seeing room titles.
+    The settle clock starts only after actual room+price data becomes parsable.
+
+    Keep this pre-wait light: inspect the top document frequently and only perform
+    the more expensive iframe fallback periodically when the top document is empty.
+    """
+    start_time = time.monotonic()
+    max_seconds = max(1.0, float(max_seconds))
+    cycles = 0
+    best_rooms: List[Dict] = []
+    seen_price_text = False
+    contexts_checked = 0
+    iframe_count = 0
+    frame_errors: List[str] = []
+
+    while time.monotonic() - start_time <= max_seconds:
+        cycles += 1
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+        try:
+            top_raw_rooms = parse_rooms_with_browser_dom(driver)
+        except Exception:
+            top_raw_rooms = []
+        top_rooms = dedupe_rooms(top_raw_rooms)
+        contexts_checked = max(contexts_checked, 1)
+
+        if top_rooms:
+            best_rooms = top_rooms
+            seen_price_text = True
+            break
+
+        # The booking UI is normally top-document React. Touch iframe trees only
+        # every third cycle so payment/analytics frames do not dominate this wait.
+        if cycles % 3 == 0:
+            context_result = collect_rooms_from_all_browser_contexts(driver, max_depth=2)
+            candidate_rooms = list(context_result.get("rooms", []))
+            seen_price_text = seen_price_text or bool(context_result.get("seen_price_text", False))
+            contexts_checked = max(contexts_checked, int(context_result.get("contexts_checked", 0) or 0))
+            iframe_count = max(iframe_count, int(context_result.get("iframe_count", 0) or 0))
+            frame_errors.extend(str(x) for x in context_result.get("frame_errors", []) if x)
+            if candidate_rooms:
+                best_rooms = candidate_rooms
+                break
+
+        # Small movement can trigger virtualized/lazy room rows without doing a full
+        # warm-up sweep again.
+        if cycles % 2 == 0:
+            scroll_booking_page_once(driver, cycles)
+
+        time.sleep(0.25)
+
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+    return {
+        "found": bool(best_rooms),
+        "rooms": best_rooms,
+        "cycles": cycles,
+        "seen_price_text": seen_price_text,
+        "contexts_checked": contexts_checked,
+        "iframe_count": iframe_count,
+        "frame_errors": frame_errors[:8],
+        "elapsed_seconds": round(time.monotonic() - start_time, 2),
+    }
+
+
 def poll_rooms_after_page_open(
     driver: webdriver.Chrome,
     max_seconds: float = 10.0,
@@ -2743,14 +2823,21 @@ def scrape_1hotels_once(
                 app_ready_result=app_ready_initial,
             )
 
-        # After the page body and app shell appear, wait briefly before reading prices.
-        # The rate rows are populated asynchronously after the cards render.
-        price_settle_seconds = max(0.0, float(settle_seconds))
-        time.sleep(price_settle_seconds)
-
-        # Trigger lazy-loaded room cards before parsing. Without this, headless Chrome
-        # can see the page shell but miss prices that render only after scrolling.
+        # First trigger lazy-loaded/virtualized room cards. This must happen BEFORE
+        # the fixed settle delay because scrolling itself can be what starts the async
+        # Selfbook rate request. Sleeping before this warm-up can waste the entire wait.
         warmup_result = warm_up_lazy_loaded_rates_all_contexts(driver)
+
+        # A hydrated React shell or visible room title is not sufficient. Wait until
+        # at least one actual room+price becomes parsable, then give the UI a fixed
+        # post-data settle window so the rest of the rate payload can paint.
+        first_rate_result = wait_for_first_rate_data(
+            driver,
+            max_seconds=max(4.0, min(7.0, float(price_poll_seconds) * 0.6)),
+        )
+        price_settle_seconds = max(0.0, float(settle_seconds))
+        if first_rate_result.get("found"):
+            time.sleep(price_settle_seconds)
 
         # Main mode uses the configured price polling window. Fallback gets a small
         # extra buffer because it only runs after primary returns no prices or fails.
@@ -2783,6 +2870,10 @@ def scrape_1hotels_once(
             "body_seen": body_seen,
             "page_load_timeout_seconds": page_load_timeout_seconds,
             "price_settle_seconds": price_settle_seconds,
+            "post_data_settle_applied": bool(first_rate_result.get("found")),
+            "first_rate_found": bool(first_rate_result.get("found")),
+            "first_rate_wait_seconds": first_rate_result.get("elapsed_seconds", 0),
+            "first_rate_wait_cycles": first_rate_result.get("cycles", 0),
             "price_poll_seconds": effective_price_poll_seconds,
             "minimum_price_poll_seconds": minimum_price_poll_seconds,
             "app_ready_elapsed_seconds": app_ready_result.get("elapsed_seconds", 0),
@@ -2793,7 +2884,7 @@ def scrape_1hotels_once(
             "contexts_scrolled": warmup_result.get("contexts_scrolled", 0),
             "contexts_checked": poll_result.get("contexts_checked", 0),
             "iframe_count": poll_result.get("iframe_count", 0),
-            "frame_errors": list(warmup_result.get("frame_errors", [])) + list(poll_result.get("frame_errors", [])),
+            "frame_errors": list(warmup_result.get("frame_errors", [])) + list(first_rate_result.get("frame_errors", [])) + list(poll_result.get("frame_errors", [])),
             "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
@@ -2824,7 +2915,7 @@ def scrape_1hotels(
         try:
             if fallback_mode:
                 attempt_wait_seconds = max(10, min(12, int(wait_seconds)))
-                attempt_settle_seconds = min(float(settle_seconds), 1.5)
+                attempt_settle_seconds = float(settle_seconds)
                 attempt_price_poll_seconds = min(float(price_poll_seconds), 6.0)
             else:
                 attempt_wait_seconds = int(wait_seconds)
@@ -2849,6 +2940,10 @@ def scrape_1hotels(
                     "body_seen": result.get("body_seen", False),
                     "page_load_timeout_seconds": result.get("page_load_timeout_seconds", 0),
                     "price_settle_seconds": result.get("price_settle_seconds", 0),
+                    "post_data_settle_applied": result.get("post_data_settle_applied", False),
+                    "first_rate_found": result.get("first_rate_found", False),
+                    "first_rate_wait_seconds": result.get("first_rate_wait_seconds", 0),
+                    "first_rate_wait_cycles": result.get("first_rate_wait_cycles", 0),
                     "price_poll_seconds": result.get("price_poll_seconds", 0),
                     "minimum_price_poll_seconds": result.get("minimum_price_poll_seconds", 0),
                     "app_ready_elapsed_seconds": result.get("app_ready_elapsed_seconds", 0),
@@ -3391,14 +3486,14 @@ if search_clicked:
         price_poll_seconds = 12.0
     else:
         adaptive_wait_seconds = int(min(16, max(int(wait_seconds), 10)))
-        price_settle_seconds = 1.5
+        price_settle_seconds = 2.0
         price_poll_seconds = 8.0
 
     cache_ttl_seconds = int(rate_cache_minutes) * 60
     spinner_prefix = "Forcing live refresh" if force_live_refresh else f"Checking {int(rate_cache_minutes)}-minute cache, then live site if needed"
     with st.spinner(
         f"{spinner_prefix}. Live budget: page up to {adaptive_wait_seconds}s, "
-        f"settle {price_settle_seconds:g}s, price poll up to {price_poll_seconds:g}s."
+        f"wait for first rate data, then settle {price_settle_seconds:g}s, price poll up to {price_poll_seconds:g}s."
     ):
         try:
             result = scrape_1hotels_with_cache(
