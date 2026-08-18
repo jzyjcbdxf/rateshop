@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-17 Starwood Hotel Rateshop cache-postdata-v4"
+APP_VERSION = "2026-08-18 Starwood Hotel Rateshop same-page-2s-retry-v5"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -77,6 +77,12 @@ BACCARAT_BOOKING_URL = "https://www.baccarathotels.com/book"
 # This is deliberately short because hotel inventory/pricing is dynamic.
 DEFAULT_RATE_CACHE_MINUTES = 5
 MAX_RATE_CACHE_ENTRIES = 256
+
+# The live booking UI can briefly paint a false "No room available" state before
+# its async rate payload finishes rendering. An empty first DOM parse is therefore
+# treated as provisional: keep the same browser/page alive, wait exactly two seconds,
+# and retry the same primary DOM parser before any slower polling or browser fallback.
+EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS = 2.0
 
 
 # Keywords used only as a room-name filter.
@@ -2190,7 +2196,11 @@ def wait_for_booking_app_ready(
 
         if title_count >= 1 and (card_count >= 1 or price_found):
             break
-        if root_child_count > 0 and body_text_length > 900 and (title_count >= 1 or price_found):
+        # A non-empty React root with meaningful text is hydrated enough to inspect.
+        # Do not wait here for room titles/prices, because the live booking UI can first
+        # paint a temporary "No room available" state and replace it with rates about
+        # two seconds later. The caller owns that exact same-page retry window.
+        if root_child_count > 0:
             break
 
         now = time.monotonic()
@@ -2791,8 +2801,8 @@ def scrape_1hotels_once(
         try:
             driver.get(url)
         except TimeoutException:
-            # With a 10s page-load timeout, the useful DOM may already exist. Continue
-            # and poll for prices instead of treating this as a hard failure.
+            # With a short page-load timeout, the useful DOM may already exist. Continue
+            # and inspect the live React page instead of treating this as a hard failure.
             get_timed_out = True
 
         try:
@@ -2803,17 +2813,17 @@ def scrape_1hotels_once(
         except TimeoutException:
             body_seen = False
 
-        # Wait for the booking app itself to hydrate. A successful <body> load is not
-        # enough; the failed long-date case shows an empty #root with only Chakra
-        # portal/select placeholders. Reload once if the root is stuck empty.
+        # Wait for the booking app shell to hydrate. This does NOT decide availability.
+        # The live site can briefly render a false "No room available" state while the
+        # async rate payload is still arriving, especially on longer date ranges.
         app_ready_initial = wait_for_booking_app_ready(
             driver,
             max_seconds=max(8.0, min(float(wait_seconds), 16.0)),
             empty_root_grace_seconds=5.0,
         )
         if fallback_mode:
-            # The fallback browser is already the second attempt. Do not stack another
-            # full refresh cycle inside it when #root is empty again.
+            # The fallback browser is already the second browser attempt. Do not stack
+            # another full refresh cycle inside it when #root is empty again.
             app_ready_result = dict(app_ready_initial)
             app_ready_result["reloaded_empty_root"] = False
         else:
@@ -2823,42 +2833,144 @@ def scrape_1hotels_once(
                 app_ready_result=app_ready_initial,
             )
 
-        # First trigger lazy-loaded/virtualized room cards. This must happen BEFORE
-        # the fixed settle delay because scrolling itself can be what starts the async
-        # Selfbook rate request. Sleeping before this warm-up can waste the entire wait.
-        warmup_result = warm_up_lazy_loaded_rates_all_contexts(driver)
+        # Trigger lazy/virtualized room rows in the TOP DOCUMENT only before the
+        # first parse. Do not touch iframe/BS4 fallbacks before the dedicated two-second
+        # same-page retry. That keeps the transient false-unavailable case cheap.
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        warm_up_lazy_loaded_rates(driver)
+        warmup_result = {
+            "contexts_scrolled": 1,
+            "frame_errors": [],
+            "top_level_fast_path": True,
+            "found_in_frame": False,
+        }
 
-        # A hydrated React shell or visible room title is not sufficient. Wait until
-        # at least one actual room+price becomes parsable, then give the UI a fixed
-        # post-data settle window so the rest of the rate payload can paint.
-        first_rate_result = wait_for_first_rate_data(
-            driver,
-            max_seconds=max(4.0, min(7.0, float(price_poll_seconds) * 0.6)),
-        )
-        price_settle_seconds = max(0.0, float(settle_seconds))
-        if first_rate_result.get("found"):
-            time.sleep(price_settle_seconds)
+        # --------------------------------------------------------------------
+        # IMPORTANT 2-SECOND SAME-PAGE RETRY
+        # --------------------------------------------------------------------
+        # Do not treat the first empty element scrape as final availability and do not
+        # immediately open a fallback browser. The booking UI is known to show a false
+        # "No room available" state for about two seconds before rates paint in.
+        #
+        # First try the PRIMARY top-document DOM parser. If it is empty, keep the exact
+        # same browser/page alive, sleep exactly two seconds, and run the same parser
+        # again. No iframe parser, BeautifulSoup parser, refresh, or new browser is used
+        # between these two reads.
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
 
-        # Main mode uses the configured price polling window. Fallback gets a small
-        # extra buffer because it only runs after primary returns no prices or fails.
-        effective_price_poll_seconds = max(5.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
-        minimum_price_poll_seconds = min(3.0 if not fallback_mode else 4.0, effective_price_poll_seconds)
-        poll_result = poll_rooms_after_page_open(
-            driver,
-            max_seconds=effective_price_poll_seconds,
-            min_seconds=minimum_price_poll_seconds,
-        )
-        raw_rooms = list(poll_result.get("raw_rooms", []))
-        rooms = dedupe_rooms(raw_rooms)
+        try:
+            same_page_initial_raw = parse_rooms_with_browser_dom(driver)
+        except Exception:
+            same_page_initial_raw = []
+        same_page_initial_rooms = dedupe_rooms(same_page_initial_raw)
 
-        html_source = driver.page_source
-        # Always merge the final page_source parse. The JavaScript DOM parser and
-        # BeautifulSoup parser catch slightly different render shapes.
-        bs4_rooms = dedupe_rooms(parse_rooms_with_bs4(html_source))
-        if bs4_rooms:
-            rooms = dedupe_rooms(raw_rooms + bs4_rooms)
+        same_page_retry_delay_seconds = float(EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS)
+        same_page_retry_applied = not bool(same_page_initial_rooms)
+        same_page_retry_succeeded = False
+        same_page_retry_raw: List[Dict] = []
+        same_page_retry_rooms: List[Dict] = []
 
-        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True)
+        if same_page_retry_applied:
+            time.sleep(same_page_retry_delay_seconds)
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+            # A tiny scroll nudge after the two-second hold can wake a virtualized room
+            # list, but it does not change page, refresh, or switch to a fallback parser.
+            try:
+                scroll_booking_page_once(driver, 1)
+            except Exception:
+                pass
+            try:
+                same_page_retry_raw = parse_rooms_with_browser_dom(driver)
+            except Exception:
+                same_page_retry_raw = []
+            same_page_retry_rooms = dedupe_rooms(same_page_retry_raw)
+            same_page_retry_succeeded = bool(same_page_retry_rooms)
+
+        # Only the specific "first read empty -> wait 2s -> second read succeeds" case
+        # gets the fast path. If the first read already had rooms, keep the existing
+        # settle/poll behavior so we do not accidentally return a partially painted list.
+        fast_path_used = bool(same_page_retry_succeeded)
+
+        # If the two-second same-page retry succeeded, return through the normal result
+        # path immediately. This avoids paying the old multi-second first-rate wait,
+        # iframe polling, BS4 parsing, and separate fallback-browser startup for the
+        # transient false-unavailable state.
+        if fast_path_used:
+            raw_rooms = list(same_page_retry_raw)
+            rooms = dedupe_rooms(raw_rooms)
+            first_rate_result = {
+                "found": True,
+                "rooms": rooms,
+                "cycles": 1,
+                "seen_price_text": True,
+                "contexts_checked": 1,
+                "iframe_count": 0,
+                "frame_errors": [],
+                "elapsed_seconds": 0.0,
+            }
+            price_settle_seconds = 0.0
+            poll_result = {
+                "raw_rooms": raw_rooms,
+                "rooms": rooms,
+                "cycles": 1,
+                "seen_price_text": True,
+                "contexts_checked": 1,
+                "iframe_count": 0,
+                "frame_errors": [],
+                "elapsed_seconds": 0.0,
+            }
+            effective_price_poll_seconds = 0.0
+            minimum_price_poll_seconds = 0.0
+        else:
+            # Only after BOTH same-page primary reads are empty do we enter the older,
+            # slower compatibility path. This preserves resilience if the site markup
+            # moves into an iframe or paints unusually late, without penalizing the
+            # common two-second false-unavailable case.
+            first_rate_result = wait_for_first_rate_data(
+                driver,
+                max_seconds=max(4.0, min(7.0, float(price_poll_seconds) * 0.6)),
+            )
+            price_settle_seconds = max(0.0, float(settle_seconds))
+            if first_rate_result.get("found"):
+                time.sleep(price_settle_seconds)
+
+            effective_price_poll_seconds = max(5.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
+            minimum_price_poll_seconds = min(3.0 if not fallback_mode else 4.0, effective_price_poll_seconds)
+            poll_result = poll_rooms_after_page_open(
+                driver,
+                max_seconds=effective_price_poll_seconds,
+                min_seconds=minimum_price_poll_seconds,
+            )
+            raw_rooms = list(poll_result.get("raw_rooms", []))
+            rooms = dedupe_rooms(raw_rooms)
+
+            # BS4 remains a compatibility parser only after the dedicated two-second
+            # same-page primary retry and the normal live polling path are both empty.
+            if not rooms:
+                try:
+                    html_source_for_bs4 = driver.page_source
+                except Exception:
+                    html_source_for_bs4 = ""
+                if html_source_for_bs4:
+                    bs4_rooms = dedupe_rooms(parse_rooms_with_bs4(html_source_for_bs4))
+                    if bs4_rooms:
+                        rooms = dedupe_rooms(raw_rooms + bs4_rooms)
+
+        try:
+            html_source = driver.page_source
+        except Exception:
+            html_source = ""
+        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True) if html_source else ""
+
         return {
             "ok": True,
             "rooms": rooms,
@@ -2870,7 +2982,7 @@ def scrape_1hotels_once(
             "body_seen": body_seen,
             "page_load_timeout_seconds": page_load_timeout_seconds,
             "price_settle_seconds": price_settle_seconds,
-            "post_data_settle_applied": bool(first_rate_result.get("found")),
+            "post_data_settle_applied": bool(first_rate_result.get("found")) and not fast_path_used,
             "first_rate_found": bool(first_rate_result.get("found")),
             "first_rate_wait_seconds": first_rate_result.get("elapsed_seconds", 0),
             "first_rate_wait_cycles": first_rate_result.get("cycles", 0),
@@ -2886,6 +2998,12 @@ def scrape_1hotels_once(
             "iframe_count": poll_result.get("iframe_count", 0),
             "frame_errors": list(warmup_result.get("frame_errors", [])) + list(first_rate_result.get("frame_errors", [])) + list(poll_result.get("frame_errors", [])),
             "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
+            "same_page_initial_rooms_count": len(same_page_initial_rooms),
+            "same_page_retry_delay_seconds": same_page_retry_delay_seconds,
+            "same_page_retry_applied": same_page_retry_applied,
+            "same_page_retry_succeeded": same_page_retry_succeeded,
+            "same_page_retry_rooms_count": len(same_page_retry_rooms),
+            "same_page_fast_path_used": fast_path_used,
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
     finally:
@@ -2956,6 +3074,12 @@ def scrape_1hotels(
                     "iframe_count": result.get("iframe_count", 0),
                     "frame_errors": result.get("frame_errors", []),
                     "poll_elapsed_seconds": result.get("poll_elapsed_seconds", 0),
+                    "same_page_initial_rooms_count": result.get("same_page_initial_rooms_count", 0),
+                    "same_page_retry_delay_seconds": result.get("same_page_retry_delay_seconds", 0),
+                    "same_page_retry_applied": result.get("same_page_retry_applied", False),
+                    "same_page_retry_succeeded": result.get("same_page_retry_succeeded", False),
+                    "same_page_retry_rooms_count": result.get("same_page_retry_rooms_count", 0),
+                    "same_page_fast_path_used": result.get("same_page_fast_path_used", False),
                     "total_elapsed_seconds": result.get("total_elapsed_seconds", 0),
                 }
             )
@@ -2965,10 +3089,11 @@ def scrape_1hotels(
             if rooms:
                 return result
 
-            if attempt_index < len(attempts):
-                time.sleep(0.8)
-                continue
-
+            # IMPORTANT: an empty result is not a reason to launch a second browser.
+            # scrape_1hotels_once() already kept the original page alive, waited two
+            # seconds, and retried the same primary DOM parser before its compatibility
+            # polling path. Only actual browser/runtime exceptions may reach the fallback
+            # browser attempt below.
             return result
         except Exception as exc:
             last_exception = exc
@@ -2989,7 +3114,7 @@ def scrape_1hotels(
         return last_result
 
     raise RuntimeError(
-        "Primary search failed and fallback retry also failed. "
+        "Primary browser attempt failed and the exception fallback retry also failed. "
         f"Retry history: {history}. Last error: {last_exception}"
     ) from last_exception
 
@@ -3492,8 +3617,8 @@ if search_clicked:
     cache_ttl_seconds = int(rate_cache_minutes) * 60
     spinner_prefix = "Forcing live refresh" if force_live_refresh else f"Checking {int(rate_cache_minutes)}-minute cache, then live site if needed"
     with st.spinner(
-        f"{spinner_prefix}. Live budget: page up to {adaptive_wait_seconds}s, "
-        f"wait for first rate data, then settle {price_settle_seconds:g}s, price poll up to {price_poll_seconds:g}s."
+        f"{spinner_prefix}. Live search keeps the same booking page open if the first room read is empty, "
+        f"retries that same DOM after {EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS:g}s, then uses compatibility polling only if still empty."
     ):
         try:
             result = scrape_1hotels_with_cache(
@@ -3510,13 +3635,8 @@ if search_clicked:
             st.session_state.last_error = ""
 
             used_fallback = any(item.get("mode") == "fallback" and item.get("status") == "ok" for item in retry_history)
-            primary_failed_or_empty = bool(
-                retry_history
-                and (
-                    retry_history[0].get("status") == "failed"
-                    or int(retry_history[0].get("rooms_count", 0) or 0) == 0
-                )
-            )
+            primary_failed = bool(retry_history and retry_history[0].get("status") == "failed")
+            same_page_retry_succeeded = bool(result.get("same_page_retry_succeeded", False))
 
             if not rooms:
                 st.session_state.last_output_text = ""
@@ -3530,8 +3650,14 @@ if search_clicked:
                 with st.expander("Debug: retry history"):
                     st.json(retry_history)
             else:
-                if used_fallback and primary_failed_or_empty:
-                    st.warning("The primary search attempt failed or returned no rooms. Fallback retry succeeded automatically.")
+                if same_page_retry_succeeded:
+                    st.info(
+                        f"The first room-element read was empty, so the same booking page was kept open for "
+                        f"{float(result.get('same_page_retry_delay_seconds', EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS)):g}s and read again. "
+                        "The second same-page read succeeded without launching a fallback browser."
+                    )
+                elif used_fallback and primary_failed:
+                    st.warning("The primary browser attempt failed with a runtime error. Exception fallback browser retry succeeded automatically.")
                 output_lines = build_output_lines(rooms, discount_percent)
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
