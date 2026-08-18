@@ -32,13 +32,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-18 Starwood Hotel Rateshop same-page-2s-retry-v5"
+APP_VERSION = "2026-08-18 Starwood Hotel Rateshop current-book-url-13s-plus-2s-v7"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
 #
 # provider="1hotels":
-#   https://www.1hotels.com/book/{hotel_code}?...
+#   https://www.1hotels.com/book/?hotelCode={hotel_code}&hotelProvider=1&...
 #
 # provider="baccarat":
 #   https://www.baccarathotels.com/book?hotelCode={hotel_code}&...
@@ -70,7 +70,7 @@ DEFAULT_HOTEL_KEY = "1SB"
 DEFAULT_CHECKIN = date.today()
 DEFAULT_CHECKOUT = date.today() + timedelta(days=1)
 DEFAULT_DISCOUNT_PERCENT = 10
-ONE_HOTELS_BOOKING_URL = "https://www.1hotels.com/book/{hotel_code}"
+ONE_HOTELS_BOOKING_URL = "https://www.1hotels.com/book/"
 BACCARAT_BOOKING_URL = "https://www.baccarathotels.com/book"
 
 # Successful live results are cached in the Streamlit server process.
@@ -81,7 +81,7 @@ MAX_RATE_CACHE_ENTRIES = 256
 # The live booking UI can briefly paint a false "No room available" state before
 # its async rate payload finishes rendering. An empty first DOM parse is therefore
 # treated as provisional: keep the same browser/page alive, wait exactly two seconds,
-# and retry the same primary DOM parser before any slower polling or browser fallback.
+# and retry the same primary DOM parser. Empty reads do not start fallback polling.
 EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS = 2.0
 
 
@@ -1524,22 +1524,29 @@ def build_booking_url(
         }
         return f"{BACCARAT_BOOKING_URL}?{urlencode(params)}"
 
+    # Current 1 Hotels/Selfbook query contract. The older /book/{hotel_code}
+    # route can redirect to /book while dropping the hotel identity, which leaves
+    # the React UI showing "Hotel: undefined" / "Reservations: undefined" and
+    # produces a false availability failure. Keep hotelCode in the query string.
     params = {
-        "startDate": checkin.isoformat(),
+        "currency": currency,
         "endDate": checkout.isoformat(),
+        "exactMatchOnly": "false",
+        "hotelCode": hotel_code,
+        "hotelProvider": "1",
+        "numRooms": 1,
+        "primaryLangId": language,
+        "startDate": checkin.isoformat(),
         "adults": adults,
         "children": children,
-        "exactMatchOnly": "false",
-        "language": language,
-        "dogs": str(dogs).lower(),
-        "cats": str(cats).lower(),
-        "rooms": "[]",
-        "currency": currency,
-        "groupCode": group_code,
-        "promoCode": promo_code,
-        "sort": sort,
+        "clientId": "1hotels",
+        "theme": "null",
     }
-    return f"{ONE_HOTELS_BOOKING_URL.format(hotel_code=hotel_code)}?{urlencode(params)}"
+    if promo_code:
+        params["promoCode"] = promo_code
+    if group_code:
+        params["groupCode"] = group_code
+    return f"{ONE_HOTELS_BOOKING_URL}?{urlencode(params)}"
 
 
 # ============================================================
@@ -2788,58 +2795,96 @@ def scrape_1hotels_once(
     price_poll_seconds: float = 6.0,
     fallback_mode: bool = False,
 ) -> Dict:
+    """
+    Open one booking page and read rooms with a deterministic same-page timing model.
+
+    Long-date 1 Hotels searches have been observed to need about 13 seconds before
+    Selfbook finishes painting the real room inventory. During that load the page may
+    briefly show a false availability/error state. The old implementation waited on a
+    React ``#root`` that the current site no longer exposes, then stacked another
+    first-rate wait and a long polling loop. That turned a roughly 13-15 second page
+    into a 40+ second scrape and could leave us reading the page after Selfbook had
+    already fallen into its temporary error state.
+
+    New empty-result behavior is intentionally simple:
+      1. keep the original browser/page;
+      2. for long searches, do the first room read at roughly T+13 seconds from
+         navigation start (short searches use a smaller render window);
+      3. if that first DOM read is empty, wait exactly two seconds;
+      4. read the SAME top-document DOM with the SAME parser again;
+      5. if still empty, return empty immediately.
+
+    No iframe scan, BeautifulSoup fallback, refresh, first-rate wait, long poll, or
+    second browser is triggered merely because the room elements were empty. Browser
+    fallback remains reserved for actual Selenium/Chrome exceptions in scrape_1hotels().
+    """
     driver = None
     started_at = time.monotonic()
+    navigation_started_at = started_at
     get_timed_out = False
     body_seen = False
 
+    # ``wait_seconds >= 14`` is how the caller marks the adaptive long-stay path.
+    # The user-observed Selfbook load time for these searches is about 13 seconds.
+    long_date_mode = int(wait_seconds) >= 14
+    initial_render_target_seconds = 13.0 if long_date_mode else max(6.0, min(9.0, float(wait_seconds) - 1.0))
+
+    def read_visible_page_text() -> str:
+        try:
+            value = driver.execute_script(
+                "return document.body ? (document.body.innerText || document.body.textContent || '') : '';"
+            )
+            return re.sub(r"\s+", " ", str(value or "")).strip()
+        except Exception:
+            return ""
+
+    def has_transient_availability_error(text: str) -> bool:
+        lowered = (text or "").lower()
+        return (
+            "issue retrieving availability" in lowered
+            or "please try again in a moment" in lowered
+            or "no room available" in lowered
+            or "no rooms available" in lowered
+        )
+
     try:
         driver = init_driver(fallback_mode=fallback_mode)
-        page_load_timeout_seconds = max(10, int(wait_seconds))
+
+        # Do not let eager navigation itself consume the old 18-20 second adaptive
+        # timeout. The useful Selfbook DOM is expected around 13 seconds, so 14 seconds
+        # is a generous cap for driver.get(); after a timeout we still inspect the live DOM.
+        page_load_timeout_seconds = min(14, max(10, int(wait_seconds)))
         driver.set_page_load_timeout(page_load_timeout_seconds)
 
+        navigation_started_at = time.monotonic()
         try:
             driver.get(url)
         except TimeoutException:
-            # With a short page-load timeout, the useful DOM may already exist. Continue
-            # and inspect the live React page instead of treating this as a hard failure.
             get_timed_out = True
 
+        # Body presence is only a sanity check. It is NOT the inventory-ready signal.
         try:
-            WebDriverWait(driver, max(3, int(wait_seconds))).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
+            WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
             body_seen = True
         except TimeoutException:
             body_seen = False
 
-        # Wait for the booking app shell to hydrate. This does NOT decide availability.
-        # The live site can briefly render a false "No room available" state while the
-        # async rate payload is still arriving, especially on longer date ranges.
-        app_ready_initial = wait_for_booking_app_ready(
-            driver,
-            max_seconds=max(8.0, min(float(wait_seconds), 16.0)),
-            empty_root_grace_seconds=5.0,
-        )
-        if fallback_mode:
-            # The fallback browser is already the second browser attempt. Do not stack
-            # another full refresh cycle inside it when #root is empty again.
-            app_ready_result = dict(app_ready_initial)
-            app_ready_result["reloaded_empty_root"] = False
-        else:
-            app_ready_result = reload_if_booking_root_is_empty(
-                driver=driver,
-                wait_seconds=wait_seconds,
-                app_ready_result=app_ready_initial,
-            )
+        # IMPORTANT: wait from navigation START, not 13 seconds after driver.get() returns.
+        # If navigation already consumed most of the 13 seconds there is little/no extra sleep.
+        elapsed_since_navigation = time.monotonic() - navigation_started_at
+        remaining_initial_render = max(0.0, initial_render_target_seconds - elapsed_since_navigation)
+        if remaining_initial_render > 0:
+            time.sleep(remaining_initial_render)
 
-        # Trigger lazy/virtualized room rows in the TOP DOCUMENT only before the
-        # first parse. Do not touch iframe/BS4 fallbacks before the dedicated two-second
-        # same-page retry. That keeps the transient false-unavailable case cheap.
+        # Do not call wait_for_booking_app_ready() here. The current production page in
+        # the supplied debug log has rootExists=false even though the booking UI is visible.
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
+
+        # One compact lazy-load sweep before the first read. This keeps the original page
+        # and does not invoke iframe or parser fallbacks.
         warm_up_lazy_loaded_rates(driver)
         warmup_result = {
             "contexts_scrolled": 1,
@@ -2848,42 +2893,34 @@ def scrape_1hotels_once(
             "found_in_frame": False,
         }
 
-        # --------------------------------------------------------------------
-        # IMPORTANT 2-SECOND SAME-PAGE RETRY
-        # --------------------------------------------------------------------
-        # Do not treat the first empty element scrape as final availability and do not
-        # immediately open a fallback browser. The booking UI is known to show a false
-        # "No room available" state for about two seconds before rates paint in.
-        #
-        # First try the PRIMARY top-document DOM parser. If it is empty, keep the exact
-        # same browser/page alive, sleep exactly two seconds, and run the same parser
-        # again. No iframe parser, BeautifulSoup parser, refresh, or new browser is used
-        # between these two reads.
-        try:
-            driver.switch_to.default_content()
-        except Exception:
-            pass
+        initial_render_elapsed_seconds = round(time.monotonic() - navigation_started_at, 2)
 
         try:
             same_page_initial_raw = parse_rooms_with_browser_dom(driver)
         except Exception:
             same_page_initial_raw = []
         same_page_initial_rooms = dedupe_rooms(same_page_initial_raw)
+        initial_page_text = read_visible_page_text()
+        transient_error_initial = has_transient_availability_error(initial_page_text)
+        initial_dom_state = get_booking_app_state(driver)
 
         same_page_retry_delay_seconds = float(EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS)
         same_page_retry_applied = not bool(same_page_initial_rooms)
         same_page_retry_succeeded = False
         same_page_retry_raw: List[Dict] = []
         same_page_retry_rooms: List[Dict] = []
+        retry_page_text = initial_page_text
+        transient_error_retry = transient_error_initial
+        retry_dom_state = initial_dom_state
 
         if same_page_retry_applied:
+            # This is the ONLY wait after a failed room-element read. Keep the exact same
+            # page alive and retry the exact same top-document DOM parser two seconds later.
             time.sleep(same_page_retry_delay_seconds)
             try:
                 driver.switch_to.default_content()
             except Exception:
                 pass
-            # A tiny scroll nudge after the two-second hold can wake a virtualized room
-            # list, but it does not change page, refresh, or switch to a fallback parser.
             try:
                 scroll_booking_page_once(driver, 1)
             except Exception:
@@ -2894,82 +2931,53 @@ def scrape_1hotels_once(
                 same_page_retry_raw = []
             same_page_retry_rooms = dedupe_rooms(same_page_retry_raw)
             same_page_retry_succeeded = bool(same_page_retry_rooms)
+            retry_page_text = read_visible_page_text()
+            transient_error_retry = has_transient_availability_error(retry_page_text)
+            retry_dom_state = get_booking_app_state(driver)
 
-        # Only the specific "first read empty -> wait 2s -> second read succeeds" case
-        # gets the fast path. If the first read already had rooms, keep the existing
-        # settle/poll behavior so we do not accidentally return a partially painted list.
-        fast_path_used = bool(same_page_retry_succeeded)
-
-        # If the two-second same-page retry succeeded, return through the normal result
-        # path immediately. This avoids paying the old multi-second first-rate wait,
-        # iframe polling, BS4 parsing, and separate fallback-browser startup for the
-        # transient false-unavailable state.
-        if fast_path_used:
+        # Use the first successful same-page read. If both reads are empty, stop here.
+        # Critically, do NOT start first-rate waits, 12-second polls, iframe scans, BS4,
+        # refreshes, or a second browser merely because room elements were not found.
+        if same_page_initial_rooms:
+            raw_rooms = list(same_page_initial_raw)
+            rooms = list(same_page_initial_rooms)
+        elif same_page_retry_rooms:
             raw_rooms = list(same_page_retry_raw)
-            rooms = dedupe_rooms(raw_rooms)
-            first_rate_result = {
-                "found": True,
-                "rooms": rooms,
-                "cycles": 1,
-                "seen_price_text": True,
-                "contexts_checked": 1,
-                "iframe_count": 0,
-                "frame_errors": [],
-                "elapsed_seconds": 0.0,
-            }
-            price_settle_seconds = 0.0
-            poll_result = {
-                "raw_rooms": raw_rooms,
-                "rooms": rooms,
-                "cycles": 1,
-                "seen_price_text": True,
-                "contexts_checked": 1,
-                "iframe_count": 0,
-                "frame_errors": [],
-                "elapsed_seconds": 0.0,
-            }
-            effective_price_poll_seconds = 0.0
-            minimum_price_poll_seconds = 0.0
+            rooms = list(same_page_retry_rooms)
         else:
-            # Only after BOTH same-page primary reads are empty do we enter the older,
-            # slower compatibility path. This preserves resilience if the site markup
-            # moves into an iframe or paints unusually late, without penalizing the
-            # common two-second false-unavailable case.
-            first_rate_result = wait_for_first_rate_data(
-                driver,
-                max_seconds=max(4.0, min(7.0, float(price_poll_seconds) * 0.6)),
-            )
-            price_settle_seconds = max(0.0, float(settle_seconds))
-            if first_rate_result.get("found"):
-                time.sleep(price_settle_seconds)
+            raw_rooms = []
+            rooms = []
 
-            effective_price_poll_seconds = max(5.0, float(price_poll_seconds)) + (2.0 if fallback_mode else 0.0)
-            minimum_price_poll_seconds = min(3.0 if not fallback_mode else 4.0, effective_price_poll_seconds)
-            poll_result = poll_rooms_after_page_open(
-                driver,
-                max_seconds=effective_price_poll_seconds,
-                min_seconds=minimum_price_poll_seconds,
-            )
-            raw_rooms = list(poll_result.get("raw_rooms", []))
-            rooms = dedupe_rooms(raw_rooms)
-
-            # BS4 remains a compatibility parser only after the dedicated two-second
-            # same-page primary retry and the normal live polling path are both empty.
-            if not rooms:
-                try:
-                    html_source_for_bs4 = driver.page_source
-                except Exception:
-                    html_source_for_bs4 = ""
-                if html_source_for_bs4:
-                    bs4_rooms = dedupe_rooms(parse_rooms_with_bs4(html_source_for_bs4))
-                    if bs4_rooms:
-                        rooms = dedupe_rooms(raw_rooms + bs4_rooms)
+        fast_path_used = bool(rooms)
+        first_rate_result = {
+            "found": bool(rooms),
+            "rooms": rooms,
+            "cycles": 1 if rooms else 0,
+            "seen_price_text": bool(rooms),
+            "contexts_checked": 1,
+            "iframe_count": 0,
+            "frame_errors": [],
+            "elapsed_seconds": 0.0,
+        }
+        price_settle_seconds = 0.0
+        effective_price_poll_seconds = 0.0
+        minimum_price_poll_seconds = 0.0
+        poll_result = {
+            "raw_rooms": raw_rooms,
+            "rooms": rooms,
+            "cycles": 1 if rooms else 0,
+            "seen_price_text": bool(rooms),
+            "contexts_checked": 1,
+            "iframe_count": 0,
+            "frame_errors": [],
+            "elapsed_seconds": 0.0,
+        }
 
         try:
             html_source = driver.page_source
         except Exception:
             html_source = ""
-        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True) if html_source else ""
+        page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True) if html_source else retry_page_text
 
         return {
             "ok": True,
@@ -2981,29 +2989,38 @@ def scrape_1hotels_once(
             "get_timed_out": get_timed_out,
             "body_seen": body_seen,
             "page_load_timeout_seconds": page_load_timeout_seconds,
+            "long_date_mode": long_date_mode,
+            "initial_render_target_seconds": initial_render_target_seconds,
+            "initial_render_elapsed_seconds": initial_render_elapsed_seconds,
             "price_settle_seconds": price_settle_seconds,
-            "post_data_settle_applied": bool(first_rate_result.get("found")) and not fast_path_used,
-            "first_rate_found": bool(first_rate_result.get("found")),
-            "first_rate_wait_seconds": first_rate_result.get("elapsed_seconds", 0),
-            "first_rate_wait_cycles": first_rate_result.get("cycles", 0),
-            "price_poll_seconds": effective_price_poll_seconds,
-            "minimum_price_poll_seconds": minimum_price_poll_seconds,
-            "app_ready_elapsed_seconds": app_ready_result.get("elapsed_seconds", 0),
-            "app_ready_last_state": app_ready_result.get("last_state", {}),
-            "reloaded_empty_root": app_ready_result.get("reloaded_empty_root", False),
-            "poll_cycles": poll_result.get("cycles", 0),
-            "seen_price_text": poll_result.get("seen_price_text", False),
+            "post_data_settle_applied": False,
+            "first_rate_found": bool(rooms),
+            "first_rate_wait_seconds": 0.0,
+            "first_rate_wait_cycles": 0,
+            "price_poll_seconds": 0.0,
+            "minimum_price_poll_seconds": 0.0,
+            # Retain the old debug keys so the UI/history stays backward-compatible,
+            # but they now describe a snapshot instead of a blocking #root readiness wait.
+            "app_ready_elapsed_seconds": initial_render_elapsed_seconds,
+            "app_ready_last_state": retry_dom_state if same_page_retry_applied else initial_dom_state,
+            "reloaded_empty_root": False,
+            "poll_cycles": 0,
+            "seen_price_text": bool(rooms),
             "contexts_scrolled": warmup_result.get("contexts_scrolled", 0),
-            "contexts_checked": poll_result.get("contexts_checked", 0),
-            "iframe_count": poll_result.get("iframe_count", 0),
-            "frame_errors": list(warmup_result.get("frame_errors", [])) + list(first_rate_result.get("frame_errors", [])) + list(poll_result.get("frame_errors", [])),
-            "poll_elapsed_seconds": poll_result.get("elapsed_seconds", 0),
+            "contexts_checked": 1,
+            "iframe_count": 0,
+            "frame_errors": [],
+            "poll_elapsed_seconds": 0.0,
             "same_page_initial_rooms_count": len(same_page_initial_rooms),
             "same_page_retry_delay_seconds": same_page_retry_delay_seconds,
             "same_page_retry_applied": same_page_retry_applied,
             "same_page_retry_succeeded": same_page_retry_succeeded,
             "same_page_retry_rooms_count": len(same_page_retry_rooms),
             "same_page_fast_path_used": fast_path_used,
+            "transient_availability_error_initial": transient_error_initial,
+            "transient_availability_error_retry": transient_error_retry,
+            "initial_page_text_preview": initial_page_text[:1200],
+            "retry_page_text_preview": retry_page_text[:1200],
             "total_elapsed_seconds": round(time.monotonic() - started_at, 2),
         }
     finally:
@@ -3057,6 +3074,11 @@ def scrape_1hotels(
                     "get_timed_out": result.get("get_timed_out", False),
                     "body_seen": result.get("body_seen", False),
                     "page_load_timeout_seconds": result.get("page_load_timeout_seconds", 0),
+                    "long_date_mode": result.get("long_date_mode", False),
+                    "initial_render_target_seconds": result.get("initial_render_target_seconds", 0),
+                    "initial_render_elapsed_seconds": result.get("initial_render_elapsed_seconds", 0),
+                    "transient_availability_error_initial": result.get("transient_availability_error_initial", False),
+                    "transient_availability_error_retry": result.get("transient_availability_error_retry", False),
                     "price_settle_seconds": result.get("price_settle_seconds", 0),
                     "post_data_settle_applied": result.get("post_data_settle_applied", False),
                     "first_rate_found": result.get("first_rate_found", False),
@@ -3618,7 +3640,7 @@ if search_clicked:
     spinner_prefix = "Forcing live refresh" if force_live_refresh else f"Checking {int(rate_cache_minutes)}-minute cache, then live site if needed"
     with st.spinner(
         f"{spinner_prefix}. Live search keeps the same booking page open if the first room read is empty, "
-        f"retries that same DOM after {EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS:g}s, then uses compatibility polling only if still empty."
+        f"retries that same DOM after {EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS:g}s, then stops if it is still empty. Empty room reads do not launch fallback polling or a second browser."
     ):
         try:
             result = scrape_1hotels_with_cache(
