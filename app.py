@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-08-18 Starwood Hotel Rateshop current-book-url-13s-plus-2s-v7"
+APP_VERSION = "2026-09-21 Starwood Hotel Rateshop local-currency-rich-email-v8"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -44,26 +44,71 @@ APP_VERSION = "2026-08-18 Starwood Hotel Rateshop current-book-url-13s-plus-2s-v
 #   https://www.baccarathotels.com/book?hotelCode={hotel_code}&...
 # ============================================================
 HOTEL_CODE_MAP: Dict[str, Dict[str, str]] = {
-    "1SB": {"code": "60507", "currency_symbol": "$", "provider": "1hotels"},
-    "1CP": {"code": "60735", "currency_symbol": "$", "provider": "1hotels"},
-    "1BB": {"code": "66266", "currency_symbol": "$", "provider": "1hotels"},
-    "1TY": {"code": "96185", "currency_symbol": "¥", "provider": "1hotels"},
-    "1ML": {"code": "47157", "currency_symbol": "$", "provider": "1hotels"},
-    "1MF": {"code": "40333", "currency_symbol": "£", "provider": "1hotels"},
-    "1HNB": {"code": "5826", "currency_symbol": "$", "provider": "1hotels"},
-    "1CPH": {"code": "41069", "currency_symbol": "kr.", "provider": "1hotels"},
-    "1NV": {"code": "35903", "currency_symbol": "$", "provider": "1hotels"},
-    "1SF": {"code": "36017", "currency_symbol": "$", "provider": "1hotels"},
-    "1SE": {"code": "47314", "currency_symbol": "$", "provider": "1hotels"},
-    "1TO": {"code": "31116", "currency_symbol": "$", "provider": "1hotels"},
-    "1WH": {"code": "77961", "currency_symbol": "$", "provider": "1hotels"},
+    "1SB": {"code": "60507", "default_currency": "USD", "provider": "1hotels"},
+    "1CP": {"code": "60735", "default_currency": "USD", "provider": "1hotels"},
+    "1BB": {"code": "66266", "default_currency": "USD", "provider": "1hotels"},
+    "1TY": {"code": "96185", "default_currency": "JPY", "provider": "1hotels"},
+    "1ML": {"code": "47157", "default_currency": "AUD", "provider": "1hotels"},
+    "1MF": {"code": "40333", "default_currency": "GBP", "provider": "1hotels"},
+    "1HNB": {"code": "5826", "default_currency": "USD", "provider": "1hotels"},
+    "1CPH": {"code": "41069", "default_currency": "DKK", "provider": "1hotels"},
+    "1NV": {"code": "35903", "default_currency": "USD", "provider": "1hotels"},
+    "1SF": {"code": "36017", "default_currency": "USD", "provider": "1hotels"},
+    "1SE": {"code": "47314", "default_currency": "USD", "provider": "1hotels"},
+    "1TO": {"code": "31116", "default_currency": "CAD", "provider": "1hotels"},
+    "1WH": {"code": "77961", "default_currency": "USD", "provider": "1hotels"},
+    "1AU": {"code": "98069", "default_currency": "USD", "provider": "1hotels"},
     "BAC": {
         "code": "62963",
-        "currency_symbol": "$",
+        "default_currency": "USD",
         "provider": "baccarat",
         "hotel_provider": "1",
         "client_id": "baccarat",
     },
+}
+
+# Selfbook exposes standardized ISO-style three-letter currency choices. Keep the
+# most commonly supported travel currencies here and always default by hotel locale.
+SUPPORTED_CURRENCY_CODES = [
+    "AED", "AUD", "BRL", "CAD", "CHF", "CLP", "CNY", "CZK", "DKK", "EUR",
+    "GBP", "HKD", "HUF", "IDR", "ILS", "INR", "JPY", "KRW", "MXN", "MYR",
+    "NOK", "NZD", "PHP", "PLN", "SAR", "SEK", "SGD", "THB", "TRY", "TWD",
+    "USD", "ZAR",
+]
+
+CURRENCY_DISPLAY_PREFIXES: Dict[str, str] = {
+    "AED": "AED ",
+    "AUD": "A$",
+    "BRL": "R$",
+    "CAD": "C$",
+    "CHF": "CHF ",
+    "CLP": "CLP ",
+    "CNY": "¥",
+    "CZK": "CZK ",
+    "DKK": "kr.",
+    "EUR": "€",
+    "GBP": "£",
+    "HKD": "HK$",
+    "HUF": "HUF ",
+    "IDR": "IDR ",
+    "ILS": "₪",
+    "INR": "₹",
+    "JPY": "¥",
+    "KRW": "₩",
+    "MXN": "MX$",
+    "MYR": "MYR ",
+    "NOK": "NOK ",
+    "NZD": "NZ$",
+    "PHP": "₱",
+    "PLN": "PLN ",
+    "SAR": "SAR ",
+    "SEK": "SEK ",
+    "SGD": "S$",
+    "THB": "฿",
+    "TRY": "₺",
+    "TWD": "NT$",
+    "USD": "$",
+    "ZAR": "R",
 }
 
 DEFAULT_HOTEL_KEY = "1SB"
@@ -127,7 +172,7 @@ ROOM_NAME_BLOCKLIST_RE = re.compile(
     re.I,
 )
 
-PRICE_RE = re.compile(r"(?P<symbol>[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
+PRICE_RE = re.compile(r"(?P<symbol>US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
@@ -1467,19 +1512,39 @@ def get_hotel_provider(hotel_key: str) -> str:
     return str(get_hotel_config(hotel_key).get("provider") or "1hotels")
 
 
+def get_hotel_default_currency(hotel_key: str) -> str:
+    """Return the hotel's local/default ISO-style three-letter currency code."""
+    code = str(get_hotel_config(hotel_key).get("default_currency") or "USD").upper().strip()
+    return code if code in SUPPORTED_CURRENCY_CODES else "USD"
+
+
+def get_currency_display_prefix(currency_code: str) -> str:
+    """Return the compact display prefix used in quote/email money values."""
+    code = str(currency_code or "USD").upper().strip()
+    return CURRENCY_DISPLAY_PREFIXES.get(code, f"{code} ")
+
+
 def get_hotel_currency_symbol(hotel_key: str) -> str:
-    return str(get_hotel_config(hotel_key).get("currency_symbol") or "$")
+    """Backward-compatible helper returning the selected hotel's local currency prefix."""
+    return get_currency_display_prefix(get_hotel_default_currency(hotel_key))
 
 
-def apply_hotel_currency_symbol(rooms: List[Dict], hotel_key: str) -> List[Dict]:
-    """Use the configured hotel currency symbol for all displayed quotes and email output."""
-    currency_symbol = get_hotel_currency_symbol(hotel_key)
+def apply_currency_display(rooms: List[Dict], currency_code: str) -> List[Dict]:
+    """Normalize scraped room prices to the user's selected booking currency display."""
+    clean_code = str(currency_code or "USD").upper().strip()
+    currency_prefix = get_currency_display_prefix(clean_code)
     updated_rooms: List[Dict] = []
     for room in rooms:
         updated_room = dict(room)
-        updated_room["currency_symbol"] = currency_symbol
+        updated_room["currency_code"] = clean_code
+        updated_room["currency_symbol"] = currency_prefix
         updated_rooms.append(updated_room)
     return updated_rooms
+
+
+def apply_hotel_currency_symbol(rooms: List[Dict], hotel_key: str) -> List[Dict]:
+    """Compatibility wrapper for callers that still want the hotel's local currency."""
+    return apply_currency_display(rooms, get_hotel_default_currency(hotel_key))
 
 
 # ============================================================
@@ -1841,7 +1906,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
     must never be used as room type titles.
     """
     script = r"""
-    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
     const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i;
     const blockedTitleRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night|best\s+offer|currently\s+selling)/i;
     const rows = [];
@@ -1963,7 +2028,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
       // discount badges such as "36% off", and package copy such as "$250 Credit".
       // Reading broad card text will therefore contaminate prices. Only accept exact,
       // visible paragraph price nodes first; use broader parsing only as a last resort.
-      const exactPriceRegex = /^\s*([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)\s*$/i;
+      const exactPriceRegex = /^\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)\s*$/i;
       const allElements = collectElements(card);
       const allPrices = [];
       const sellingPrices = [];
@@ -2068,7 +2133,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
 def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
     """Return True if the current document or any open shadow root contains a price-looking string."""
     script = r"""
-    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
     function collectText(root) {
       let text = '';
       const seen = new Set();
@@ -2099,7 +2164,7 @@ def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
 def get_booking_app_state(driver: webdriver.Chrome) -> Dict[str, object]:
     """Inspect whether the React/Selfbook booking app has actually hydrated."""
     script = r"""
-    const priceRegex = /([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)/i;
+    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
     const roomTitleRegex = /(king|queen|suite|studio|home|ocean|city|skyline|balcony|connecting|two\s+queens|two\s+kings|one\s+bedroom)/i;
     const blockedRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night)/i;
 
@@ -2444,7 +2509,7 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
         selling_prices: List[Dict[str, object]] = []
         all_prices: List[Dict[str, object]] = []
         exact_price_re = re.compile(
-            r"^\s*([$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|USD|CAD|AUD|EUR|GBP|kr\.?)\s*([0-9][0-9,]*)\s*$",
+            r"^\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)\s*$",
             re.I,
         )
 
@@ -3275,15 +3340,18 @@ def group_rooms_by_category(rooms: List[Dict]) -> Dict[str, List[Dict]]:
 
 
 def build_output_lines(rooms: List[Dict], discount_percent: float) -> List[str]:
+    """Build email-ready Markdown lines, bolding only the best-offer money value."""
     lines: List[str] = []
     for room in rooms:
         current = int(room["current_selling"])
         best = discount_price(current, discount_percent)
         room_name = room["room_name"]
         currency_symbol = str(room.get("currency_symbol") or "$")
+        best_money = format_money(best, currency_symbol)
+        current_money = format_money(current, currency_symbol)
         lines.append(
-            f"▫{room_name} | Best offer: {format_money(best, currency_symbol)} per night. "
-            f"(Currently selling: {format_money(current, currency_symbol)})"
+            f"▫{room_name} | Best offer: **{best_money}** per night. "
+            f"(Currently selling: {current_money})"
         )
     return lines
 
@@ -3424,12 +3492,24 @@ def build_email_body(
     return "\n\n".join(parts)
 
 
+def email_markdown_to_plain_text(text: str) -> str:
+    """Remove the limited Markdown emphasis used by generated quote lines."""
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", text or "")
+
+
+def email_markdown_to_html(text: str) -> str:
+    """Convert generated-email bold markers into safe HTML for rich clipboard paste."""
+    escaped = html.escape(text or "")
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    return escaped.replace("\n", "<br>")
+
+
 def render_copy_button(text_to_copy: str) -> None:
-    escaped_text = html.escape(text_to_copy or "")
+    plain_text = email_markdown_to_plain_text(text_to_copy)
+    rich_html = email_markdown_to_html(text_to_copy)
     components.html(
         f"""
         <div style="display:flex; align-items:center; gap:8px; height:42px;">
-            <textarea id="email-copy-source" style="position:absolute; left:-9999px; top:-9999px;">{escaped_text}</textarea>
             <button
                 id="copy-email-button"
                 style="
@@ -3443,28 +3523,59 @@ def render_copy_button(text_to_copy: str) -> None:
                     box-shadow:0 5px 14px rgba(37,76,58,.065);
                     cursor:pointer;
                 "
-                onclick="
-                    const source = document.getElementById('email-copy-source');
-                    const button = document.getElementById('copy-email-button');
-                    navigator.clipboard.writeText(source.value).then(function() {{
-                        button.innerText = 'Copied';
-                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
-                    }}).catch(function() {{
-                        source.style.position = 'fixed';
-                        source.style.left = '0';
-                        source.style.top = '0';
-                        source.focus();
-                        source.select();
-                        document.execCommand('copy');
-                        source.style.position = 'absolute';
-                        source.style.left = '-9999px';
-                        source.style.top = '-9999px';
-                        button.innerText = 'Copied';
-                        setTimeout(function() {{ button.innerText = 'Copy'; }}, 1400);
-                    }});
-                "
             >Copy</button>
         </div>
+        <script>
+        (() => {{
+            const button = document.getElementById('copy-email-button');
+            const plainText = {json.dumps(plain_text)};
+            const richHtml = {json.dumps(rich_html)};
+
+            function showCopied() {{
+                button.innerText = 'Copied';
+                window.setTimeout(() => {{ button.innerText = 'Copy'; }}, 1400);
+            }}
+
+            async function copyRich() {{
+                if (navigator.clipboard && window.ClipboardItem) {{
+                    const item = new ClipboardItem({{
+                        'text/plain': new Blob([plainText], {{type: 'text/plain'}}),
+                        'text/html': new Blob([richHtml], {{type: 'text/html'}}),
+                    }});
+                    await navigator.clipboard.write([item]);
+                    showCopied();
+                    return;
+                }}
+
+                const fallback = document.createElement('div');
+                fallback.contentEditable = 'true';
+                fallback.style.position = 'fixed';
+                fallback.style.left = '-9999px';
+                fallback.innerHTML = richHtml;
+                document.body.appendChild(fallback);
+                const range = document.createRange();
+                range.selectNodeContents(fallback);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                document.execCommand('copy');
+                selection.removeAllRanges();
+                fallback.remove();
+                showCopied();
+            }}
+
+            button.addEventListener('click', () => {{
+                copyRich().catch(async () => {{
+                    try {{
+                        await navigator.clipboard.writeText(plainText);
+                        showCopied();
+                    }} catch (error) {{
+                        button.innerText = 'Copy failed';
+                    }}
+                }});
+            }});
+        }})();
+        </script>
         """,
         height=46,
     )
@@ -3484,17 +3595,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def _sync_booking_currency_to_hotel() -> None:
+    selected_hotel = str(st.session_state.get("rate_shop_hotel") or DEFAULT_HOTEL_KEY)
+    st.session_state["booking_currency"] = get_hotel_default_currency(selected_hotel)
+
+
 with st.sidebar:
-    st.markdown(
-        f"""
-        <div class="rs-sidebrand">
-          <div class="kicker">Commercial Tools</div>
-          <div class="name">Rate Shop</div>
-          <div class="meta">Live pricing workspace · {html.escape(APP_VERSION)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     st.markdown("#### Search Settings")
 
     if st.button("LOGOUT"):
@@ -3504,14 +3610,30 @@ with st.sidebar:
         render_logout_and_reload()
         st.stop()
 
+    if "rate_shop_hotel" not in st.session_state:
+        st.session_state["rate_shop_hotel"] = DEFAULT_HOTEL_KEY
+    if "booking_currency" not in st.session_state:
+        st.session_state["booking_currency"] = get_hotel_default_currency(
+            str(st.session_state["rate_shop_hotel"])
+        )
+
     hotel_key = st.selectbox(
         "Hotel",
         options=list(HOTEL_CODE_MAP.keys()),
-        index=list(HOTEL_CODE_MAP.keys()).index(DEFAULT_HOTEL_KEY),
+        key="rate_shop_hotel",
+        on_change=_sync_booking_currency_to_hotel,
     )
     hotel_code = get_hotel_code(hotel_key)
     hotel_provider = get_hotel_provider(hotel_key)
-    selected_currency_symbol = get_hotel_currency_symbol(hotel_key)
+    hotel_default_currency = get_hotel_default_currency(hotel_key)
+
+    currency = st.selectbox(
+        "Currency",
+        options=SUPPORTED_CURRENCY_CODES,
+        key="booking_currency",
+        help=f"Defaults to {hotel_default_currency}, the local currency configured for {hotel_key}. You can override it for this search.",
+    )
+    selected_currency_symbol = get_currency_display_prefix(currency)
 
     checkin = st.date_input("Check-in", value=DEFAULT_CHECKIN)
     default_checkout = max(DEFAULT_CHECKOUT, checkin + timedelta(days=1))
@@ -3529,8 +3651,9 @@ with st.sidebar:
     st.checkbox("Rates include tax in client email", key="rates_include_tax")
 
     with st.expander("Advanced search options", expanded=False):
-        st.caption(f"Hotel code {hotel_code} · {hotel_provider} · display {selected_currency_symbol}")
-        currency = st.selectbox("Booking currency", options=["USD"], index=0)
+        st.caption(
+            f"Hotel code {hotel_code} · {hotel_provider} · local {hotel_default_currency} · selected {currency}"
+        )
         sort = st.selectbox("Rate sort", options=["low", "high"], index=0)
         group_code = st.text_input("Group code", value="")
         promo_code = st.text_input("Promo code", value="")
@@ -3598,7 +3721,7 @@ st.markdown(
       <div class="rs-summary-card">
         <div class="label">Offer</div>
         <div class="value">{float(discount_percent):g}% off</div>
-        <div class="foot">Display currency {html.escape(selected_currency_symbol)}</div>
+        <div class="foot">Currency {html.escape(currency)} · {html.escape(selected_currency_symbol)}</div>
       </div>
     </div>
     """,
@@ -3652,7 +3775,7 @@ if search_clicked:
                 cache_ttl_seconds=cache_ttl_seconds,
                 force_live_refresh=bool(force_live_refresh),
             )
-            rooms = apply_hotel_currency_symbol(result.get("rooms", []), hotel_key)
+            rooms = apply_currency_display(result.get("rooms", []), currency)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
 
