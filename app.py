@@ -1589,29 +1589,24 @@ def build_booking_url(
         }
         return f"{BACCARAT_BOOKING_URL}?{urlencode(params)}"
 
-    # Current 1 Hotels/Selfbook query contract. The older /book/{hotel_code}
-    # route can redirect to /book while dropping the hotel identity, which leaves
-    # the React UI showing "Hotel: undefined" / "Reservations: undefined" and
-    # produces a false availability failure. Keep hotelCode in the query string.
+    # Canonical route observed in the live 1 Hotels booking page redirect.
+    # Retain Baccarat's independent query contract above.
     params = {
-        "currency": currency,
-        "endDate": checkout.isoformat(),
-        "exactMatchOnly": "false",
-        "hotelCode": hotel_code,
-        "hotelProvider": "1",
-        "numRooms": 1,
-        "primaryLangId": language,
         "startDate": checkin.isoformat(),
+        "endDate": checkout.isoformat(),
         "adults": adults,
         "children": children,
-        "clientId": "1hotels",
-        "theme": "null",
+        "exactMatchOnly": "false",
+        "language": language,
+        "dogs": str(bool(dogs)).lower(),
+        "cats": str(bool(cats)).lower(),
+        "rooms": "[]",
+        "currency": currency,
+        "groupCode": group_code or "",
+        "promoCode": promo_code or "",
+        "sort": sort or "low",
     }
-    if promo_code:
-        params["promoCode"] = promo_code
-    if group_code:
-        params["groupCode"] = group_code
-    return f"{ONE_HOTELS_BOOKING_URL}?{urlencode(params)}"
+    return f"{ONE_HOTELS_BOOKING_URL.rstrip('/')}/{hotel_code}?{urlencode(params)}"
 
 
 # ============================================================
@@ -2272,7 +2267,7 @@ def wait_for_booking_app_ready(
         # Do not wait here for room titles/prices, because the live booking UI can first
         # paint a temporary "No room available" state and replace it with rates about
         # two seconds later. The caller owns that exact same-page retry window.
-        if root_child_count > 0:
+        if root_child_count > 0 and (title_count > 0 or price_found):
             break
 
         now = time.monotonic()
@@ -2853,6 +2848,45 @@ def poll_rooms_after_page_open(
         "elapsed_seconds": round(time.monotonic() - start_time, 2),
     }
 
+def get_booking_render_status(driver: webdriver.Chrome) -> Dict[str, object]:
+    """Differentiate booking content from cookie-only/loading React shells."""
+    script = r"""
+    const clean = v => String(v || '').replace(/\s+/g, ' ').trim();
+    const body = clean(document.body && document.body.innerText);
+    const root = document.querySelector('#root');
+    const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]'))
+        .map(el => clean(el.innerText)).filter(Boolean);
+    const roomTitles = headings.filter(x => /(?:room|king|queen|suite|studio|ocean|city|balcony)/i.test(x) && x.length < 100);
+    const cookieOnly = body.length < 1000 && /(?:we \(and our partners\) use cookies|accept all cookies|reject non-essential)/i.test(body) && roomTitles.length === 0;
+    const explicitlyUnavailable = /(?:no rooms? available|no available rooms|sold out|no availability for (?:the|your) selected dates|no accommodations available)/i.test(body);
+    const loading = /(?:loading (?:rooms|rates|availability)|searching availability|finding rooms)/i.test(body);
+    return {url: location.href, bodyLength:body.length, bodyPreview:body.slice(0,400),
+      rootPresent:!!root, roomTitleCount:roomTitles.length, cookieOnly, explicitlyUnavailable, loading,
+      documentReady:document.readyState};
+    """
+    try:
+        return driver.execute_script(script) or {}
+    except Exception as exc:
+        return {"error":str(exc)}
+
+
+def dismiss_booking_cookie_banner(driver: webdriver.Chrome) -> bool:
+    """Reject optional cookies if their consent control blocks the booking UI."""
+    script = r"""
+    const rx = /^(reject non-essential|reject all|only necessary|necessary only|decline optional)$/i;
+    const nodes = Array.from(document.querySelectorAll('button,[role="button"]'));
+    for (const el of nodes) {
+      const txt = (el.innerText || el.getAttribute('aria-label') || '').replace(/\s+/g,' ').trim();
+      if (rx.test(txt) && el.getClientRects().length) { el.click(); return true; }
+    }
+    return false;
+    """
+    try:
+        return bool(driver.execute_script(script))
+    except Exception:
+        return False
+
+
 def scrape_1hotels_once(
     url: str,
     wait_seconds: int = 10,
@@ -3014,103 +3048,80 @@ def scrape_1hotels_once(
                 f"states={navigation_states!r}"
             )
 
-        # One compact lazy-load sweep before the first read. This keeps the original page
-        # and does not invoke iframe or parser fallbacks.
-        warm_up_lazy_loaded_rates(driver)
-        warmup_result = {
-            "contexts_scrolled": 1,
-            "frame_errors": [],
-            "top_level_fast_path": True,
-            "found_in_frame": False,
-        }
-
+        # Wait for actual room/rate content, not simply a nonempty React root or
+        # OneTrust cookie dialog. An explicit no-availability message must remain
+        # stable across observations before being considered a genuine empty search.
+        warmup_result = {"contexts_scrolled": 0, "frame_errors": [],
+                         "top_level_fast_path": False, "found_in_frame": False}
         initial_render_elapsed_seconds = round(time.monotonic() - navigation_started_at, 2)
-
-        try:
-            same_page_initial_raw = parse_rooms_with_browser_dom(driver)
-        except Exception:
-            same_page_initial_raw = []
-        same_page_initial_rooms = dedupe_rooms(same_page_initial_raw)
+        same_page_initial_raw: List[Dict] = []
+        same_page_initial_rooms: List[Dict] = []
+        same_page_retry_raw: List[Dict] = []
+        same_page_retry_rooms: List[Dict] = []
         initial_page_text = read_visible_page_text()
         transient_error_initial = has_transient_availability_error(initial_page_text)
         initial_dom_state = get_booking_app_state(driver)
-
-        same_page_retry_delay_seconds = float(EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS)
-        same_page_retry_applied = not bool(same_page_initial_rooms)
-        same_page_retry_succeeded = False
-        same_page_retry_raw: List[Dict] = []
-        same_page_retry_rooms: List[Dict] = []
+        retry_dom_state = initial_dom_state
         retry_page_text = initial_page_text
         transient_error_retry = transient_error_initial
-        retry_dom_state = initial_dom_state
-
-        if same_page_retry_applied:
-            # This is the ONLY wait after a failed room-element read. Keep the exact same
-            # page alive and retry the exact same top-document DOM parser two seconds later.
-            time.sleep(same_page_retry_delay_seconds)
+        same_page_retry_delay_seconds = 2.0
+        same_page_retry_applied = False
+        same_page_retry_succeeded = False
+        render_status_history = []
+        poll_cycles_count = 0
+        prices_seen = False
+        empty_state_count = 0
+        cookie_dismissed = False
+        rooms: List[Dict] = []
+        raw_rooms: List[Dict] = []
+        # Timer begins after the initial render window; do not charge page
+        # navigation delays twice. Upper bound avoids indefinite waits.
+        max_render_wait = max(18.0, min(36.0, float(wait_seconds) + 18.0))
+        poll_started = time.monotonic()
+        while time.monotonic() - poll_started < max_render_wait:
+            poll_cycles_count += 1
             try:
                 driver.switch_to.default_content()
             except Exception:
                 pass
-            try:
-                scroll_booking_page_once(driver, 1)
-            except Exception:
-                pass
-            try:
-                same_page_retry_raw = parse_rooms_with_browser_dom(driver)
-            except Exception:
-                same_page_retry_raw = []
-            same_page_retry_rooms = dedupe_rooms(same_page_retry_raw)
-            same_page_retry_succeeded = bool(same_page_retry_rooms)
-            retry_page_text = read_visible_page_text()
-            transient_error_retry = has_transient_availability_error(retry_page_text)
-            retry_dom_state = get_booking_app_state(driver)
-
-        # Use the first successful same-page read. If both reads are empty, stop here.
-        # Critically, do NOT start first-rate waits, 12-second polls, iframe scans, BS4,
-        # refreshes, or a second browser merely because room elements were not found.
-        if same_page_initial_rooms:
-            raw_rooms = list(same_page_initial_raw)
-            rooms = list(same_page_initial_rooms)
-        elif same_page_retry_rooms:
-            raw_rooms = list(same_page_retry_raw)
-            rooms = list(same_page_retry_rooms)
-        else:
-            raw_rooms = []
-            rooms = []
-
-        # A loaded URL is not sufficient: guard against an empty response shell.
-        # Only retry page hydration for a genuinely empty page, not for a hotel
-        # that displays a meaningful no-availability message.
-        if not rooms:
-            final_state = navigation_state()
-            navigation_states.append(final_state)
-            text_now = read_visible_page_text()
-            if not text_now and int(final_state.get("body_length") or 0) == 0:
-                try:
-                    driver.refresh()
-                except TimeoutException:
-                    get_timed_out = True
-                except WebDriverException as exc:
-                    raise RuntimeError(f"PAGE_NOT_READY: refresh failed: {exc}") from exc
-                for _ in range(12):
-                    time.sleep(0.5)
-                    refreshed_state = navigation_state()
-                    if is_blank_navigation(refreshed_state):
-                        continue
-                    refreshed_raw = parse_rooms_with_browser_dom(driver)
-                    refreshed_rooms = dedupe_rooms(refreshed_raw)
-                    if refreshed_rooms:
-                        raw_rooms = refreshed_raw
-                        rooms = refreshed_rooms
-                        break
-                    if read_visible_page_text():
-                        break
-                if not rooms and not read_visible_page_text():
-                    raise RuntimeError(
-                        "PAGE_NOT_READY: booking document contains no usable text after refresh; "
-                        f"url={final_state.get('url')!r}"
-                    )
+            status = get_booking_render_status(driver)
+            render_status_history.append(status)
+            if len(render_status_history) > 12:
+                render_status_history.pop(0)
+            if not cookie_dismissed and status.get('cookieOnly'):
+                cookie_dismissed = dismiss_booking_cookie_banner(driver)
+            if poll_cycles_count == 1 or poll_cycles_count % 4 == 0:
+                scroll_booking_page_once(driver, poll_cycles_count)
+                warmup_result['contexts_scrolled'] += 1
+            current_raw = parse_rooms_with_browser_dom(driver)
+            current_rooms = dedupe_rooms(current_raw)
+            if poll_cycles_count == 1:
+                same_page_initial_raw = current_raw
+                same_page_initial_rooms = current_rooms
+            elif not same_page_retry_applied:
+                same_page_retry_applied = True
+                same_page_retry_raw = current_raw
+                same_page_retry_rooms = current_rooms
+                same_page_retry_succeeded = bool(current_rooms)
+            if current_rooms:
+                raw_rooms, rooms = current_raw, current_rooms
+                prices_seen = True
+                break
+            prices_seen = prices_seen or bool(get_booking_app_state(driver).get('priceTextFound'))
+            if status.get('explicitlyUnavailable') and not status.get('cookieOnly') and not status.get('loading'):
+                empty_state_count += 1
+                if empty_state_count >= 3:
+                    break
+            else:
+                empty_state_count = 0
+            time.sleep(0.75)
+        retry_page_text = read_visible_page_text()
+        transient_error_retry = has_transient_availability_error(retry_page_text)
+        retry_dom_state = get_booking_app_state(driver)
+        render_wait_elapsed = round(time.monotonic() - poll_started, 2)
+        confirmed_no_availability = empty_state_count >= 3
+        failure_reason = ('' if rooms else 'NO_AVAILABILITY' if confirmed_no_availability
+                          else 'RATE_PARSE_FAILED' if prices_seen else 'RATE_LOAD_TIMEOUT')
 
         fast_path_used = bool(rooms)
         first_rate_result = {
@@ -3153,7 +3164,9 @@ def scrape_1hotels_once(
             "get_timed_out": get_timed_out,
             "navigation_retries": navigation_retries,
             "navigation_states": navigation_states,
-            "failure_reason": "" if rooms else ("RATE_PARSE_FAILED" if (initial_dom_state.get("priceTextFound") or retry_dom_state.get("priceTextFound")) else "NO_AVAILABILITY_OR_PENDING"),
+            "failure_reason": failure_reason,
+            "render_status_history": render_status_history,
+            "cookie_dismissed": cookie_dismissed,
             "body_seen": body_seen,
             "page_load_timeout_seconds": page_load_timeout_seconds,
             "long_date_mode": long_date_mode,
@@ -3164,20 +3177,20 @@ def scrape_1hotels_once(
             "first_rate_found": bool(rooms),
             "first_rate_wait_seconds": 0.0,
             "first_rate_wait_cycles": 0,
-            "price_poll_seconds": 0.0,
+            "price_poll_seconds": render_wait_elapsed,
             "minimum_price_poll_seconds": 0.0,
             # Retain the old debug keys so the UI/history stays backward-compatible,
             # but they now describe a snapshot instead of a blocking #root readiness wait.
             "app_ready_elapsed_seconds": initial_render_elapsed_seconds,
             "app_ready_last_state": retry_dom_state if same_page_retry_applied else initial_dom_state,
             "reloaded_empty_root": False,
-            "poll_cycles": 0,
-            "seen_price_text": bool(rooms),
+            "poll_cycles": poll_cycles_count,
+            "seen_price_text": prices_seen,
             "contexts_scrolled": warmup_result.get("contexts_scrolled", 0),
             "contexts_checked": 1,
             "iframe_count": 0,
             "frame_errors": [],
-            "poll_elapsed_seconds": 0.0,
+            "poll_elapsed_seconds": render_wait_elapsed,
             "same_page_initial_rooms_count": len(same_page_initial_rooms),
             "same_page_retry_delay_seconds": same_page_retry_delay_seconds,
             "same_page_retry_applied": same_page_retry_applied,
@@ -3289,6 +3302,8 @@ def scrape_1hotels(
             # seconds, and retried the same primary DOM parser before its compatibility
             # polling path. Only actual browser/runtime exceptions may reach the fallback
             # browser attempt below.
+            if result.get("failure_reason") in ("RATE_LOAD_TIMEOUT", "RATE_PARSE_FAILED") and attempt_index < len(attempts):
+                continue
             return result
         except Exception as exc:
             last_exception = exc
