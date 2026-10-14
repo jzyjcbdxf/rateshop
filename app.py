@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-09-21 Starwood Hotel Rateshop local-currency-rich-email-v8"
+APP_VERSION = "2026-10-14 Starwood Hotel Rateshop navigation-recovery-v9"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -2065,7 +2065,7 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
       for (const node of allElements) {
         const tagName = String(node.tagName || '').toUpperCase();
         const className = String(node.className || '');
-        if (tagName === 'P' && /(^|\s)css-1oc1v88(\s|$)/.test(className)) {
+        if (tagName === 'P' && /(^|\s)(css-1oc1v88|css-yvesra)(\s|$)/.test(className)) {
           pushExactPrice(node, sellingPrices);
         }
       }
@@ -2534,7 +2534,7 @@ def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
 
         # Primary, user-confirmed selector from DevTools screenshot:
         # <p class="css-1oc1v88">$5,435</p>
-        for node in card.find_all("p", class_=lambda c: c and "css-1oc1v88" in str(c).split()):
+        for node in card.find_all("p", class_=lambda c: c and any(x in str(c).split() for x in ("css-1oc1v88", "css-yvesra"))):
             parsed_price = parse_exact_node_price(node)
             if parsed_price:
                 selling_prices.append(parsed_price)
@@ -2927,6 +2927,62 @@ def scrape_1hotels_once(
         except TimeoutException:
             get_timed_out = True
 
+        # A timeout does not prove that navigation succeeded. A blank Chrome document
+        # has a body too, so validate URL AND meaningful DOM before extracting prices.
+        # A second navigation is reserved for actual blank/failed navigation, never
+        # for a genuinely loaded booking page reporting no availability.
+        navigation_retries = 0
+        navigation_states = []
+
+        def navigation_state():
+            try:
+                return driver.execute_script("""
+                    return {
+                        url: String(location.href || ''),
+                        body_length: (document.body && (document.body.innerText || document.body.textContent) || '').trim().length,
+                        html_length: document.documentElement ? document.documentElement.outerHTML.length : 0,
+                        ready_state: document.readyState
+                    };
+                """) or {}
+            except Exception as exc:
+                return {"error": str(exc)}
+
+        def is_blank_navigation(state):
+            page_url = str(state.get("url") or "").lower()
+            return (not page_url or page_url == "about:blank" or
+                    page_url.startswith("chrome-error://") or
+                    page_url.startswith("chrome://error") or
+                    ("error" in state and not page_url))
+
+        nav_state = navigation_state()
+        navigation_states.append(nav_state)
+        if is_blank_navigation(nav_state):
+            # The first timed-out navigation can leave Chromium at about:blank.
+            # Stop the pending load before opening the actual URL again.
+            for retry_index in range(2):
+                navigation_retries += 1
+                try:
+                    driver.execute_script("window.stop();")
+                except Exception:
+                    pass
+                try:
+                    driver.get(url)
+                except TimeoutException:
+                    get_timed_out = True
+                except WebDriverException:
+                    if retry_index == 1:
+                        raise
+                nav_state = navigation_state()
+                navigation_states.append(nav_state)
+                if not is_blank_navigation(nav_state):
+                    break
+                time.sleep(0.75)
+            if is_blank_navigation(nav_state):
+                raise RuntimeError(
+                    "NAVIGATION_FAILED: booking page remained blank after retries; "
+                    f"states={navigation_states!r}"
+                )
+
         # Body presence is only a sanity check. It is NOT the inventory-ready signal.
         try:
             WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
@@ -2947,6 +3003,16 @@ def scrape_1hotels_once(
             driver.switch_to.default_content()
         except Exception:
             pass
+
+        # Check again after the render window: a transient navigation may have
+        # changed to an empty/error document while we waited.
+        nav_after_render = navigation_state()
+        navigation_states.append(nav_after_render)
+        if is_blank_navigation(nav_after_render):
+            raise RuntimeError(
+                "NAVIGATION_FAILED: booking page became blank during render; "
+                f"states={navigation_states!r}"
+            )
 
         # One compact lazy-load sweep before the first read. This keeps the original page
         # and does not invoke iframe or parser fallbacks.
@@ -3013,6 +3079,39 @@ def scrape_1hotels_once(
             raw_rooms = []
             rooms = []
 
+        # A loaded URL is not sufficient: guard against an empty response shell.
+        # Only retry page hydration for a genuinely empty page, not for a hotel
+        # that displays a meaningful no-availability message.
+        if not rooms:
+            final_state = navigation_state()
+            navigation_states.append(final_state)
+            text_now = read_visible_page_text()
+            if not text_now and int(final_state.get("body_length") or 0) == 0:
+                try:
+                    driver.refresh()
+                except TimeoutException:
+                    get_timed_out = True
+                except WebDriverException as exc:
+                    raise RuntimeError(f"PAGE_NOT_READY: refresh failed: {exc}") from exc
+                for _ in range(12):
+                    time.sleep(0.5)
+                    refreshed_state = navigation_state()
+                    if is_blank_navigation(refreshed_state):
+                        continue
+                    refreshed_raw = parse_rooms_with_browser_dom(driver)
+                    refreshed_rooms = dedupe_rooms(refreshed_raw)
+                    if refreshed_rooms:
+                        raw_rooms = refreshed_raw
+                        rooms = refreshed_rooms
+                        break
+                    if read_visible_page_text():
+                        break
+                if not rooms and not read_visible_page_text():
+                    raise RuntimeError(
+                        "PAGE_NOT_READY: booking document contains no usable text after refresh; "
+                        f"url={final_state.get('url')!r}"
+                    )
+
         fast_path_used = bool(rooms)
         first_rate_result = {
             "found": bool(rooms),
@@ -3052,6 +3151,9 @@ def scrape_1hotels_once(
             "html_preview": html_source[:3500],
             "attempt_mode": "fallback" if fallback_mode else "primary",
             "get_timed_out": get_timed_out,
+            "navigation_retries": navigation_retries,
+            "navigation_states": navigation_states,
+            "failure_reason": "" if rooms else ("RATE_PARSE_FAILED" if (initial_dom_state.get("priceTextFound") or retry_dom_state.get("priceTextFound")) else "NO_AVAILABILITY_OR_PENDING"),
             "body_seen": body_seen,
             "page_load_timeout_seconds": page_load_timeout_seconds,
             "long_date_mode": long_date_mode,
@@ -3137,6 +3239,9 @@ def scrape_1hotels(
                     "status": "ok",
                     "rooms_count": len(rooms),
                     "get_timed_out": result.get("get_timed_out", False),
+                    "navigation_retries": result.get("navigation_retries", 0),
+                    "navigation_states": result.get("navigation_states", []),
+                    "failure_reason": result.get("failure_reason", ""),
                     "body_seen": result.get("body_seen", False),
                     "page_load_timeout_seconds": result.get("page_load_timeout_seconds", 0),
                     "long_date_mode": result.get("long_date_mode", False),
@@ -3176,6 +3281,9 @@ def scrape_1hotels(
             if rooms:
                 return result
 
+            # A correctly loaded booking page with genuinely empty inventory does not
+            # warrant a new browser. Failed navigation and blank DOM raise above and
+            # therefore reach the fallback attempt through the exception handler.
             # IMPORTANT: an empty result is not a reason to launch a second browser.
             # scrape_1hotels_once() already kept the original page alive, waited two
             # seconds, and retried the same primary DOM parser before its compatibility
