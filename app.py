@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # IMPORTANT VERSION MARKER
 # If you do not see this marker in Streamlit sidebar, the old app.py is still running.
 # ============================================================
-APP_VERSION = "2026-10-14 Starwood Hotel Rateshop navigation-recovery-v9"
+APP_VERSION = "2026-11-16 Starwood Rateshop verified-room-carousel-v10"
 
 # ============================================================
 # Hotel map: dropdown label -> booking-provider configuration
@@ -134,45 +134,46 @@ EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS = 2.0
 # The scraper scans h1/h2/h3/h4 titles and keeps titles that look like room names.
 # This prevents non-room text such as navigation labels, banners, or policy copy from being parsed as rooms.
 ROOM_NAME_HINTS = (
-    "room",
-    "king",
-    "queen",
-    "suite",
-    "studio",
-    "home",
-    "ocean",
-    "city",
-    "skyline",
-    "two",
-    "one",
-    "balcony",
+    "room", "king", "queen", "suite", "studio", "home", "ocean",
+    "city", "skyline", "two", "one", "balcony", "connecting",
+    "double", "twin", "penthouse", "loft", "villa", "residence",
 )
 
-# Text that can appear inside a room card but is not a room type.
-# This prevents rate labels, warnings, CTA text, and availability badges from
-# being treated as room names simply because they contain the word "room".
+# Word boundaries prevent ParkING from being mistaken for a KING room.
+ROOM_NAME_WORDS_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(word) for word in ROOM_NAME_HINTS) + r")\b", re.I
+)
 ROOM_NAME_BLOCKLIST_RE = re.compile(
-    r"(?:"
-    r"price\s+is\s+subject\s+to\s+change|"
-    r"must\s+be\s+18|"
-    r"room\s+left|"
-    r"rooms?\s+left|"
-    r"select\s+room|"
-    r"available\s+rates?|"
-    r"avg\s*/?\s*night|"
-    r"average\s+size|"
-    r"non[-\s]?refundable|"
-    r"flexible\s+cancellation|"
-    r"all\s+rates\s+include|"
-    r"amenity\s+fee|"
-    r"per\s+night|"
-    r"best\s+offer|"
-    r"currently\s+selling"
-    r")",
-    re.I,
+    r"(?:price\s+is\s+subject\s+to\s+change|must\s+be\s+18|"
+    r"rooms?\s+left|select\s+room|available\s+rates?|avg\s*/?\s*night|"
+    r"average\s+size|non[-\s]?refundable|flexible\s+cancellation|"
+    r"all\s+rates\s+include|amenity\s+fee|per\s+night|best\s+offer|"
+    r"currently\s+selling)", re.I,
+)
+EXTRA_NAME_BLOCKLIST_RE = re.compile(
+    r"\b(?:parking|valet|breakfast|airport\s+transfer|transfer|shuttle|"
+    r"transportation|late\s+check[-\s]?out|early\s+check[-\s]?in|"
+    r"resort\s+fee|destination\s+fee|pet\s+fee|dog\s+fee|"
+    r"restaurant|dining\s+credit|spa\s+(?:treatment|access|credit|pass)|"
+    r"cabana\s+rental|day\s+pass|gift\s+card|add\s+extras?)\b", re.I,
 )
 
-PRICE_RE = re.compile(r"(?P<symbol>US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
+
+def is_safe_room_title(name: str) -> bool:
+    title = normalize_room_name(name)
+    if len(title) < 3 or len(title) > 100:
+        return False
+    if title.casefold() in {"rooms", "room", "suites", "suite", "homes", "home", "extras", "connecting"}:
+        return False
+    if ROOM_NAME_BLOCKLIST_RE.search(title) or EXTRA_NAME_BLOCKLIST_RE.search(title):
+        return False
+    if PRICE_RE.search(title):
+        return False
+    return bool(re.search(r"[a-zA-Z]", title))
+
+
+
+PRICE_RE = re.compile(r"(?P<symbol>US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*(?P<amount>[0-9][0-9,]*)", re.I)
 
 st.set_page_config(page_title="Starwood Hotel Rateshop", layout="wide")
 
@@ -1530,14 +1531,32 @@ def get_hotel_currency_symbol(hotel_key: str) -> str:
 
 
 def apply_currency_display(rooms: List[Dict], currency_code: str) -> List[Dict]:
-    """Normalize scraped room prices to the user's selected booking currency display."""
+    """Format selected booking currency without converting numbers or hiding mismatches.
+
+    A plain '$' on the booking page is not sufficient to identify USD vs AUD/CAD,
+    so it uses the selected request currency. Explicitly different currency
+    prefixes, however, must not be relabeled and quoted as another currency.
+    """
     clean_code = str(currency_code or "USD").upper().strip()
     currency_prefix = get_currency_display_prefix(clean_code)
+    explicit_symbols = {
+        "US$":"USD", "AU$":"AUD", "A$":"AUD", "CA$":"CAD", "C$":"CAD",
+        "NZ$":"NZD", "HK$":"HKD", "S$":"SGD", "R$":"BRL", "MX$":"MXN",
+        "NT$":"TWD", "€":"EUR", "£":"GBP", "₹":"INR", "₩":"KRW",
+        "₪":"ILS", "₱":"PHP", "฿":"THB", "₺":"TRY",
+    }
     updated_rooms: List[Dict] = []
     for room in rooms:
         updated_room = dict(room)
+        original_symbol = str(updated_room.get("raw_currency_symbol") or updated_room.get("currency_symbol") or "$").strip()
+        detected = explicit_symbols.get(original_symbol)
+        if len(original_symbol) == 3 and original_symbol.isalpha() and original_symbol.upper() in SUPPORTED_CURRENCY_CODES:
+            detected = original_symbol.upper()
+        if detected and detected != clean_code:
+            continue
         updated_room["currency_code"] = clean_code
         updated_room["currency_symbol"] = currency_prefix
+        updated_room["currency_verified"] = detected == clean_code if detected else None
         updated_rooms.append(updated_room)
     return updated_rooms
 
@@ -1840,15 +1859,10 @@ def normalize_room_name(name: str) -> str:
 
 
 def looks_like_room_name(name: str) -> bool:
+    """Conservative fallback for unverified titles; never substring-match 'king' in 'parking'."""
     cleaned = normalize_room_name(name)
-    if len(cleaned) < 4 or len(cleaned) > 90:
-        return False
-    if PRICE_RE.search(cleaned):
-        return False
-    if ROOM_NAME_BLOCKLIST_RE.search(cleaned):
-        return False
-    lower_name = cleaned.lower()
-    return any(hint in lower_name for hint in ROOM_NAME_HINTS)
+    return is_safe_room_title(cleaned) and bool(ROOM_NAME_WORDS_RE.search(cleaned))
+
 
 
 def discount_price(current_price: int, discount_percent: float) -> int:
@@ -1870,253 +1884,178 @@ def escape_streamlit_label(text: str) -> str:
 
 
 def dedupe_rooms(raw_rooms: List[Dict]) -> List[Dict]:
+    """Accept only legitimate room-rate pairs; never let add-on services into quotes."""
     best_by_room: Dict[str, Dict] = {}
     for room in raw_rooms:
         room_name = normalize_room_name(str(room.get("room_name", "")))
         current_price = room.get("current_selling")
-        if not looks_like_room_name(room_name) or not isinstance(current_price, int):
+        verified = room.get("room_card_verified") is True
+        if not is_safe_room_title(room_name):
             continue
-        if current_price <= 0 or current_price > 20000:
+        if not verified and not looks_like_room_name(room_name):
             continue
-
-        key = room_name.lower()
+        if not isinstance(current_price, (int, float)) or isinstance(current_price, bool):
+            continue
+        if not math.isfinite(current_price) or current_price <= 0 or current_price > 100_000_000:
+            continue
+        current_price = int(round(current_price))
+        # Require an extracted rate-plan code, or a clearly identified room card with
+        # a standalone price in the existing fallback format.
+        if room.get("source") == "room_rate_plan" and not room.get("rate_plan_code"):
+            continue
+        key = room_name.casefold()
         if key not in best_by_room or current_price < best_by_room[key]["current_selling"]:
+            prices = [p for p in room.get("all_detected_prices", [current_price])
+                      if isinstance(p, (int, float)) and p > 0]
             best_by_room[key] = {
                 "room_name": room_name,
                 "current_selling": current_price,
                 "currency_symbol": str(room.get("currency_symbol") or "$"),
-                "all_detected_prices": sorted(set(room.get("all_detected_prices", [current_price]))),
+                "raw_currency_symbol": str(room.get("raw_currency_symbol") or room.get("currency_symbol") or "$"),
+                "all_detected_prices": sorted({int(round(p)) for p in prices} | {current_price}),
+                "room_card_verified": verified,
+                "source": str(room.get("source") or ""),
+                "rate_plan_code": str(room.get("rate_plan_code") or ""),
+                "rate_plan_count": int(room.get("rate_plan_count") or 0),
             }
-
     return sorted(best_by_room.values(), key=lambda item: (item["current_selling"], item["room_name"]))
 
 
-def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
-    """
-    Parse room-card prices from the current browsing context, including open shadow DOM.
 
-    Important: do not infer room names from arbitrary text inside the card. The 1 Hotels
-    booking UI contains labels such as "1 Room Left!", "Select Room", and policy copy
-    inside the same card. Those contain the word "room" and can be near prices, so they
-    must never be used as room type titles.
+def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
+    """Read actual accommodation cards and their own rate-plan radio items.
+
+    Stable anchors confirmed in the supplied 1 Hotels DevTools screenshots:
+      [data-scope="carousel"][data-part="item"]
+        .chakra-card__root h3.chakra-card__title
+        [data-scope="radio-group"][data-part="item"]
+          input[name="ratePlanCode"]  +  p (standalone selling price)
+
+    React-generated IDs such as ``carousel:_r_r_:item:1`` and
+    ``radio-group:_r_18_:radio:NOREF2`` are deliberately NOT hardcoded.
     """
     script = r"""
-    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
-    const roomRegex = /(room|king|queen|suite|studio|home|ocean|city|skyline|two|one|balcony|connecting)/i;
-    const blockedTitleRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night|best\s+offer|currently\s+selling)/i;
+    const priceRE = /^\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*$/i;
+    const anyPriceRE = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*[0-9]/i;
+    const disallowedRE = /\b(?:parking|valet|breakfast|airport\s+transfer|transfer|shuttle|transportation|late\s+check[-\s]?out|early\s+check[-\s]?in|resort\s+fee|destination\s+fee|pet\s+fee|dog\s+fee|restaurant|dining\s+credit|spa\s+(?:treatment|access|credit|pass)|cabana\s+rental|day\s+pass|gift\s+card|add\s+extras?)\b/i;
+    const forbiddenRE = /(?:price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night|best\s+offer|currently\s+selling)/i;
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const all = selector => Array.from(document.querySelectorAll(selector));
+    const diagnostics = {
+      parser: 'verified-room-carousel-v10', carouselItems: 0, candidateRoomCards: 0,
+      ratePlanRows: 0, pricedRoomCards: 0, rejected: [], unpriced: [],
+      fallbackPriceCards: 0, roomNames: [], slideGroups: 0,
+    };
     const rows = [];
 
-    function cleanText(value) {
-      return (value || '').replace(/\s+/g, ' ').trim();
+    function isAccommodationTitle(title) {
+      if (title.length < 3 || title.length > 100) return false;
+      if (/^(rooms?|suites?|homes?|extras?|connecting)$/i.test(title)) return false;
+      if (disallowedRE.test(title) || forbiddenRE.test(title) || anyPriceRE.test(title)) return false;
+      return /[a-zA-Z]/.test(title);
     }
 
-    function elementText(element) {
-      return cleanText(element ? (element.innerText || element.textContent || '') : '');
+    function standalonePrice(node) {
+      if (!node || !node.isConnected) return null;
+      if (node.closest('s, strike, del, [aria-label*="original" i]')) return null;
+      const css = getComputedStyle(node);
+      if (css && (css.display === 'none' || css.visibility === 'hidden' ||
+          String(css.textDecorationLine || '').includes('line-through'))) return null;
+      const text = clean(node.textContent);
+      const match = text.match(priceRE);
+      if (!match) return null;
+      const amount = Math.round(Number(String(match[2]).replace(/,/g, '')));
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) return null;
+      return {amount, symbol: match[1]};
     }
 
-    function collectElements(root) {
-      const out = [];
-      const seen = new Set();
-      function walk(node) {
-        if (!node || seen.has(node)) return;
-        seen.add(node);
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          out.push(node);
-          if (node.shadowRoot) walk(node.shadowRoot);
+    function titleOf(card) {
+      const title = card.querySelector('h3.chakra-card__title, h2.chakra-card__title, [class*="chakra-card__title"], [class*="chakra-card_title"]');
+      return title ? clean(title.textContent) : '';
+    }
+
+    function findRatePlans(card) {
+      const options = Array.from(card.querySelectorAll('[data-scope="radio-group"][data-part="item"]'));
+      diagnostics.ratePlanRows += options.length;
+      const plans = [];
+      for (const option of options) {
+        const radio = option.querySelector('input[name="ratePlanCode"],input[type="radio"]');
+        // Within the actual rate option only, never search the whole page for a cheap price.
+        // Prefer rate-display paragraphs confirmed in the supplied screenshot.
+        // Generated Chakra classes are only an ordering hint, never a requirement.
+        const allParagraphs = Array.from(option.querySelectorAll('p'));
+        const prioritizedParagraphs = [
+          ...allParagraphs.filter(node => /(?:^|\s)css-(?:yvesra|1oc1v88)(?:\s|$)/.test(String(node.className || ''))),
+          ...allParagraphs,
+        ];
+        let chosen = null;
+        for (const node of prioritizedParagraphs) {
+          const parsed = standalonePrice(node);
+          if (parsed) { chosen = parsed; break; }
         }
-        const children = node.children ? Array.from(node.children) : [];
-        for (const child of children) walk(child);
-      }
-      walk(root || document.body || document.documentElement);
-      return out;
-    }
-
-    function isRoomTitle(value) {
-      const text = cleanText(value);
-      if (text.length < 4 || text.length > 90) return false;
-      if (priceRegex.test(text)) return false;
-      if (blockedTitleRegex.test(text)) return false;
-      return roomRegex.test(text);
-    }
-
-    function nearestRoomCard(titleNode) {
-      if (!titleNode) return null;
-      const selectors = [
-        '[data-scope="carousel"][data-part="item"]',
-        '.chakra-card__root',
-        '[class*="chakra-card"]',
-        'article',
-        'section'
-      ];
-      for (const selector of selectors) {
-        try {
-          const card = titleNode.closest(selector);
-          if (card) return card;
-        } catch (error) {}
-      }
-      let node = titleNode.parentElement || (titleNode.getRootNode && titleNode.getRootNode().host) || null;
-      for (let depth = 0; node && depth < 6; depth += 1) {
-        const text = elementText(node);
-        if (priceRegex.test(text) && text.length >= 30 && text.length <= 4500) return node;
-        node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
-      }
-      return null;
-    }
-
-    function findRoomTitle(card) {
-      const cardElements = collectElements(card);
-
-      // Primary selector from the current 1 Hotels/Selfbook UI:
-      // <h3 class="chakra-card__title ...">City View King</h3>
-      const titleSelectors = [
-        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-        '[role="heading"]',
-        '[class*="card__title"]',
-        '[class*="card_title"]'
-      ];
-      const seen = new Set();
-      const candidates = [];
-      for (const selector of titleSelectors) {
-        try {
-          for (const node of card.querySelectorAll(selector)) {
-            if (!seen.has(node)) {
-              seen.add(node);
-              candidates.push(node);
-            }
+        if (!chosen) {
+          for (const node of option.querySelectorAll('span')) {
+            const parsed = standalonePrice(node);
+            if (parsed) { chosen = parsed; break; }
           }
-        } catch (error) {}
+        }
+        if (!chosen) continue;
+        const code = radio ? clean(radio.value || radio.getAttribute('value')) : '';
+        plans.push({...chosen, code: code || clean(option.getAttribute('data-value')) || 'rate-option'});
       }
-
-      for (const node of candidates) {
-        const text = elementText(node);
-        if (isRoomTitle(text)) return text;
-      }
-      return '';
+      return plans;
     }
 
-    function collectCandidateCards() {
-      const allElements = collectElements(document.body || document.documentElement);
-      const cards = [];
-      const seenCards = new Set();
-      const titleNodes = allElements.filter(el => {
-        const tagName = String(el.tagName || '').toUpperCase();
-        const isHeading = /^(H1|H2|H3|H4|H5|H6)$/.test(tagName) || el.getAttribute('role') === 'heading' || /card__title|card_title/i.test(String(el.className || ''));
-        return isHeading && isRoomTitle(elementText(el));
-      });
-
-      for (const titleNode of titleNodes) {
-        const card = nearestRoomCard(titleNode);
-        if (!card || seenCards.has(card)) continue;
-        const text = elementText(card);
-        if (!priceRegex.test(text)) continue;
-        seenCards.add(card);
-        cards.push(card);
-      }
-      return cards;
+    const seen = new Set();
+    const candidates = [];
+    // Normal layout: each room is one carousel slide with one Chakra room card.
+    for (const item of all('[data-scope="carousel"][data-part="item"]')) {
+      diagnostics.carouselItems += 1;
+      const card = item.querySelector('.chakra-card__root, [class*="chakra-card__root"]');
+      if (!card || seen.has(card)) continue;
+      // Image galleries are also carousels; they do not have a room title and rate plans.
+      if (!card.querySelector('h3.chakra-card__title, [class*="chakra-card__title"]')) continue;
+      seen.add(card); candidates.push(card);
     }
-
-    function parsePrices(card) {
-      // IMPORTANT: The correct displayed selling price in the current 1 Hotels UI is the
-      // standalone paragraph node, for example:
-      //   <p class="css-1oc1v88">$5,435</p>
-      // The same rate row also contains crossed-out original prices such as <s>$8,439</s>,
-      // discount badges such as "36% off", and package copy such as "$250 Credit".
-      // Reading broad card text will therefore contaminate prices. Only accept exact,
-      // visible paragraph price nodes first; use broader parsing only as a last resort.
-      const exactPriceRegex = /^\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)\s*$/i;
-      const allElements = collectElements(card);
-      const allPrices = [];
-      const sellingPrices = [];
-
-      function isVisible(node) {
-        if (!node) return false;
-        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
-        if (!style) return true;
-        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) return false;
-        return true;
-      }
-
-      function isCrossedOut(node) {
-        if (!node) return false;
-        const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
-        const decoration = style ? String(style.textDecorationLine || style.textDecoration || '') : '';
-        if (/line-through/i.test(decoration)) return true;
-        if (node.closest && node.closest('s, strike, del')) return true;
-        return false;
-      }
-
-      function pushExactPrice(node, target) {
-        const text = elementText(node);
-        const match = text.match(exactPriceRegex);
-        if (!match) return false;
-        if (!isVisible(node) || isCrossedOut(node)) return false;
-        const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
-        if (!Number.isFinite(value) || value <= 0 || value > 20000) return false;
-        target.push({value, symbol: match[1] || '$'});
-        return true;
-      }
-
-      // Primary, user-confirmed selector from DevTools screenshot.
-      for (const node of allElements) {
-        const tagName = String(node.tagName || '').toUpperCase();
-        const className = String(node.className || '');
-        if (tagName === 'P' && /(^|\s)(css-1oc1v88|css-yvesra)(\s|$)/.test(className)) {
-          pushExactPrice(node, sellingPrices);
-        }
-      }
-
-      // Secondary fallback: exact standalone <p>$123</p> nodes only. This still avoids
-      // package descriptions like "Nonrefundable: $250 Credit" because those are not
-      // exact price-only paragraphs.
-      if (!sellingPrices.length) {
-        for (const node of allElements) {
-          const tagName = String(node.tagName || '').toUpperCase();
-          if (tagName === 'P') pushExactPrice(node, sellingPrices);
-        }
-      }
-
-      for (const item of sellingPrices) allPrices.push(item);
-
-      // Last-resort fallback only if the site changes markup and no standalone p price
-      // nodes are present. Keep this strict and exclude known contamination terms.
-      if (!sellingPrices.length) {
-        const priceNodes = allElements.filter(el => /^(P|SPAN)$/i.test(el.tagName || ''));
-        for (const node of priceNodes) {
-          const text = elementText(node);
-          if (!text || text.length > 80) continue;
-          const match = text.match(priceRegex);
-          if (!match) continue;
-          if (/amenity|fee|tax|total|include|included|resort|destination|deposit|due now|credit|transfer|breakfast|parking|spa|package/i.test(text)) continue;
-          if (/%\s*off|was|original|strike/i.test(text)) continue;
-          if (!isVisible(node) || isCrossedOut(node)) continue;
-          const value = parseInt(String(match[2] || '').replace(/,/g, ''), 10);
-          if (!Number.isFinite(value) || value <= 0 || value > 20000) continue;
-          const item = {value, symbol: match[1] || '$'};
-          allPrices.push(item);
-          sellingPrices.push(item);
-        }
-      }
-
-      return {allPrices, sellingPrices};
+    // Compatibility for a revised layout where room cards are no longer in a carousel.
+    for (const card of all('.chakra-card__root, [class*="chakra-card__root"]')) {
+      if (seen.has(card)) continue;
+      if (!card.querySelector('h3.chakra-card__title, [class*="chakra-card__title"]')) continue;
+      if (!card.querySelector('[data-scope="radio-group"], input[name="ratePlanCode"]')) continue;
+      seen.add(card); candidates.push(card);
     }
+    diagnostics.candidateRoomCards = candidates.length;
+    diagnostics.slideGroups = all('[data-scope="carousel"][data-part="item-group"]').filter(
+      group => !!group.querySelector('h3.chakra-card__title, [class*="chakra-card__title"]')
+    ).length;
 
-    for (const card of collectCandidateCards()) {
-      const roomName = findRoomTitle(card);
-      if (!roomName) continue;
-
-      const parsed = parsePrices(card);
-      const candidatePrices = parsed.sellingPrices.length ? parsed.sellingPrices : parsed.allPrices;
-      if (!candidatePrices.length) continue;
-
-      const bestPrice = candidatePrices.reduce((best, item) => item.value < best.value ? item : best, candidatePrices[0]);
+    for (const card of candidates) {
+      const title = titleOf(card);
+      if (!isAccommodationTitle(title)) {
+        diagnostics.rejected.push({title: title || '(missing title)', reason:'not an accommodation'});
+        continue;
+      }
+      const ratePlans = findRatePlans(card);
+      if (!ratePlans.length) {
+        diagnostics.unpriced.push(title);
+        continue;
+      }
+      const best = ratePlans.reduce((a, b) => a.amount <= b.amount ? a : b);
       rows.push({
-        room_name: roomName,
-        current_selling: bestPrice.value,
-        currency_symbol: bestPrice.symbol || '$',
-        all_detected_prices: Array.from(new Set(parsed.allPrices.map(item => item.value))).sort((a, b) => a - b),
+        room_name: title,
+        current_selling: best.amount,
+        currency_symbol: best.symbol,
+        raw_currency_symbol: best.symbol,
+        rate_plan_code: best.code,
+        rate_plan_count: ratePlans.length,
+        all_detected_prices: [...new Set(ratePlans.map(rate => rate.amount))].sort((a,b) => a-b),
+        room_card_verified: true,
+        source: 'room_rate_plan',
       });
+      diagnostics.pricedRoomCards += 1;
+      diagnostics.roomNames.push(title);
     }
-
+    window.__starwoodLastRoomScan = diagnostics;
     return rows;
     """
     try:
@@ -2125,10 +2064,21 @@ def parse_rooms_with_browser_dom(driver: webdriver.Chrome) -> List[Dict]:
         return []
     return rows if isinstance(rows, list) else []
 
+
+def get_room_parse_diagnostics(driver: webdriver.Chrome) -> Dict[str, object]:
+    """Return parser telemetry from the last DOM extraction in this browsing context."""
+    try:
+        result = driver.execute_script("return window.__starwoodLastRoomScan || {};")
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+
 def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
     """Return True if the current document or any open shadow root contains a price-looking string."""
     script = r"""
-    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
+    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*([0-9][0-9,]*)/i;
     function collectText(root) {
       let text = '';
       const seen = new Set();
@@ -2159,7 +2109,7 @@ def current_context_has_price_text(driver: webdriver.Chrome) -> bool:
 def get_booking_app_state(driver: webdriver.Chrome) -> Dict[str, object]:
     """Inspect whether the React/Selfbook booking app has actually hydrated."""
     script = r"""
-    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)/i;
+    const priceRegex = /(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*([0-9][0-9,]*)/i;
     const roomTitleRegex = /(king|queen|suite|studio|home|ocean|city|skyline|balcony|connecting|two\s+queens|two\s+kings|one\s+bedroom)/i;
     const blockedRegex = /(price\s+is\s+subject\s+to\s+change|must\s+be\s+18|rooms?\s+left|select\s+room|available\s+rates?|avg\s*\/?\s*night|average\s+size|non[-\s]?refundable|flexible\s+cancellation|all\s+rates\s+include|amenity\s+fee|per\s+night)/i;
 
@@ -2468,137 +2418,117 @@ def collect_page_sources_from_all_contexts(driver: webdriver.Chrome, max_depth: 
     return sources
 
 def parse_rooms_with_bs4(html_source: str) -> List[Dict]:
-    """
-    Conservative fallback parser for final page_source only.
+    """Offline fallback for the verified Chakra room-card/rate-plan structure.
 
-    It intentionally reads room names only from heading/card title nodes. It does not
-    infer room names from arbitrary text because policy copy and CTA labels can contain
-    the word "room" and contaminate the result.
+    No unrestricted <section> ancestor and no pricing outside a room rate option.
     """
-    soup = BeautifulSoup(html_source, "html.parser")
+    soup = BeautifulSoup(html_source or "", "html.parser")
     raw_rooms: List[Dict] = []
-
-    title_nodes = []
-    for selector in ["h1", "h2", "h3", "h4", "h5", "h6", '[role="heading"]']:
-        title_nodes.extend(soup.select(selector))
-    title_nodes.extend(
-        node for node in soup.find_all(class_=lambda c: c and ("card__title" in str(c) or "card_title" in str(c)))
-        if node not in title_nodes
-    )
-
-    for title in title_nodes:
-        room_name = normalize_room_name(title.get_text(" ", strip=True))
-        if not looks_like_room_name(room_name):
+    for card in soup.select('.chakra-card__root, [class*="chakra-card__root"]'):
+        title = card.select_one('h3.chakra-card__title, [class*="chakra-card__title"]')
+        if title is None:
             continue
-
-        card = title.find_parent(attrs={"data-scope": "carousel", "data-part": "item"})
-        if card is None:
-            card = title.find_parent(class_=lambda c: c and "chakra-card__root" in str(c))
-        if card is None:
-            card = title.find_parent(class_=lambda c: c and "chakra-card" in str(c))
-        if card is None:
-            card = title.find_parent(["article", "section"])
-        if card is None:
+        name = normalize_room_name(title.get_text(" ", strip=True))
+        if not is_safe_room_title(name):
             continue
-
-        selling_prices: List[Dict[str, object]] = []
-        all_prices: List[Dict[str, object]] = []
-        exact_price_re = re.compile(
-            r"^\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|[A-Z]{3}|kr\.?)\s*([0-9][0-9,]*)\s*$",
-            re.I,
-        )
-
-        def node_is_crossed_out(node) -> bool:
-            if node.find_parent(["s", "strike", "del"]):
-                return True
-            style_value = " ".join(str(node.get(attr, "")) for attr in ["style", "class"])
-            return bool(re.search(r"line-through|strike|original", style_value, re.I))
-
-        def parse_exact_node_price(node) -> Optional[Dict[str, object]]:
-            text = node.get_text(" ", strip=True)
-            match = exact_price_re.match(text or "")
-            if not match or node_is_crossed_out(node):
-                return None
-            try:
-                amount = int(match.group(2).replace(",", ""))
-            except ValueError:
-                return None
-            if amount <= 0 or amount > 20000:
-                return None
-            return {"amount": amount, "symbol": match.group(1) or "$"}
-
-        # Primary, user-confirmed selector from DevTools screenshot:
-        # <p class="css-1oc1v88">$5,435</p>
-        for node in card.find_all("p", class_=lambda c: c and any(x in str(c).split() for x in ("css-1oc1v88", "css-yvesra"))):
-            parsed_price = parse_exact_node_price(node)
-            if parsed_price:
-                selling_prices.append(parsed_price)
-
-        # Secondary fallback: exact standalone paragraph price nodes only.
-        # This avoids polluted text like "$250 Credit", "All rates include $66 amenity fee",
-        # and crossed-out original rates.
-        if not selling_prices:
-            for node in card.find_all("p"):
-                parsed_price = parse_exact_node_price(node)
-                if parsed_price:
-                    selling_prices.append(parsed_price)
-
-        all_prices.extend(selling_prices)
-
-        # Last-resort fallback if the markup class changes. Keep this narrow.
-        if not selling_prices:
-            for node in card.find_all(["p", "span"]):
-                text = node.get_text(" ", strip=True)
-                if not text or len(text) > 80 or not PRICE_RE.search(text):
+        available_rates = []
+        for option in card.select('[data-scope="radio-group"][data-part="item"]'):
+            radio = option.select_one('input[name="ratePlanCode"], input[type="radio"]')
+            code = (radio.get('value', '') if radio else '') or 'rate-option'
+            price = None
+            for candidate in option.select('p, span'):
+                if candidate.find_parent(['s','strike','del']):
                     continue
-                if re.search(
-                    r"amenity|fee|tax|total|include|included|resort|destination|deposit|due now|credit|transfer|breakfast|parking|spa|package|%\s*off|was|original|strike",
-                    text,
-                    re.I,
-                ):
+                if re.search(r'line-through', str(candidate.get('style','')), re.I):
                     continue
-                if node_is_crossed_out(node):
+                text = candidate.get_text(' ', strip=True)
+                match = re.fullmatch(
+                    r'\s*(US\$|CA\$|C\$|AU\$|A\$|NZ\$|HK\$|S\$|R\$|MX\$|NT\$|[$€£¥₹₩₪₫₱฿₦₵₡₲₴₺₽]|(?:AED|AUD|BRL|CAD|CHF|CLP|CNY|CZK|DKK|EUR|GBP|HKD|HUF|IDR|ILS|INR|JPY|KRW|MXN|MYR|NOK|NZD|PHP|PLN|SAR|SEK|SGD|THB|TRY|TWD|USD|ZAR)\b|kr\.?)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*',
+                    text, re.I)
+                if not match:
                     continue
-                parsed_price = parse_price_match(text)
-                if not parsed_price:
-                    continue
-                price = int(parsed_price["amount"])
-                if price <= 0 or price > 20000:
-                    continue
-                all_prices.append(parsed_price)
-                selling_prices.append(parsed_price)
+                amount = int(float(match.group(2).replace(',', '')) + 0.5)
+                if 0 < amount <= 100_000_000:
+                    price = {"amount":amount, "symbol":match.group(1), "code":code}
+                    break
+            if price is not None:
+                available_rates.append(price)
+        if not available_rates:
+            continue
+        best = min(available_rates, key=lambda value:value['amount'])
+        raw_rooms.append({"room_name":name, "current_selling":best['amount'],
+                          "currency_symbol":best['symbol'], "raw_currency_symbol":best['symbol'],
+                          "rate_plan_code":best['code'], "rate_plan_count":len(available_rates),
+                          "all_detected_prices":sorted({x['amount'] for x in available_rates}),
+                          "room_card_verified":True, "source":"room_rate_plan"})
+    return dedupe_rooms(raw_rooms)
 
-        candidate_prices = selling_prices or all_prices
-        if candidate_prices:
-            best_price = min(candidate_prices, key=lambda item: int(item["amount"]))
-            raw_rooms.append(
-                {
-                    "room_name": room_name,
-                    "current_selling": int(best_price["amount"]),
-                    "currency_symbol": str(best_price.get("symbol") or "$"),
-                    "all_detected_prices": sorted(set(int(item["amount"]) for item in all_prices)),
-                }
-            )
-
-    return raw_rooms
 
 
 def scroll_booking_page_once(driver: webdriver.Chrome, step_index: int) -> None:
-    """Scroll enough to trigger lazy-loaded room cards and async price nodes."""
+    """Nudge vertical lazy-loaded sections without assuming that horizontal slides move."""
     try:
-        driver.execute_script(
-            """
-            const height = Math.max(
-              document.body ? document.body.scrollHeight : 0,
-              document.documentElement ? document.documentElement.scrollHeight : 0
-            );
-            const positions = [0, 0.18, 0.36, 0.54, 0.72, 0.9, 1.0, 0.55, 0.25];
-            const ratio = positions[step_index % positions.length];
-            window.scrollTo({top: Math.floor(height * ratio), behavior: 'instant'});
-            """
-        )
+        driver.execute_script("""
+            const scrollHeight = Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0);
+            const steps = [0, .2, .45, .7, .95, .55, 0];
+            window.scrollTo({top: Math.floor(scrollHeight * steps[arguments[0] % steps.length]), behavior:'instant'});
+        """, int(step_index))
     except Exception:
         pass
+
+
+def scroll_room_carousels(driver: webdriver.Chrome, step_index: int) -> Dict[str, int]:
+    """Walk the room-category item-groups, not the nested room-photo galleries.
+
+    Returns the number of room carousels and a full-sweep length. Steps advance
+    one card at a time using scrollLeft, which works with the screenshot's
+    CSS overflow-x:auto and scroll-snap layout. This also triggers virtualized cards.
+    """
+    script = r"""
+      const groups = [...document.querySelectorAll('[data-scope="carousel"][data-part="item-group"]')]
+        .filter(node => !!node.querySelector('h3.chakra-card__title,[class*="chakra-card__title"]'));
+      let maxSlides = 1;
+      let moved = 0;
+      for (const group of groups) {
+        const slides = [...group.querySelectorAll(':scope > [data-scope="carousel"][data-part="item"]')];
+        const slideTotal = Math.max(slides.length, ...slides.map(node => {
+          const label = String(node.getAttribute('aria-label') || '');
+          const match = label.match(/of\s+(\d+)/i);
+          return match ? parseInt(match[1],10) : 0;
+        }));
+        maxSlides = Math.max(maxSlides, slideTotal);
+        const limit = Math.max(0, group.scrollWidth - group.clientWidth);
+        if (limit > 0) {
+          const viewport = Math.max(1, group.clientWidth);
+          const target = Math.min(limit, Math.max(0, arguments[0]) * viewport * .95);
+          group.scrollLeft = target;
+          moved += 1;
+        }
+      }
+      return {carouselCount: groups.length, maxSlides: maxSlides, moved: moved};
+    """
+    try:
+        result = driver.execute_script(script, int(step_index))
+        if isinstance(result, dict):
+            return {"carouselCount": int(result.get("carouselCount") or 0),
+                    "maxSlides": int(result.get("maxSlides") or 1),
+                    "moved": int(result.get("moved") or 0)}
+    except Exception:
+        pass
+    return {"carouselCount": 0, "maxSlides": 1, "moved": 0}
+
+
+def reset_room_carousels(driver: webdriver.Chrome) -> None:
+    try:
+        driver.execute_script(r"""
+          document.querySelectorAll('[data-scope="carousel"][data-part="item-group"]').forEach(group => {
+            if (group.querySelector('h3.chakra-card__title,[class*="chakra-card__title"]')) group.scrollLeft = 0;
+          });
+          window.scrollTo(0, 0);
+        """)
+    except Exception:
+        pass
+
 
 
 def warm_up_lazy_loaded_rates(driver: webdriver.Chrome) -> None:
@@ -2894,28 +2824,9 @@ def scrape_1hotels_once(
     price_poll_seconds: float = 6.0,
     fallback_mode: bool = False,
 ) -> Dict:
-    """
-    Open one booking page and read rooms with a deterministic same-page timing model.
-
-    Long-date 1 Hotels searches have been observed to need about 13 seconds before
-    Selfbook finishes painting the real room inventory. During that load the page may
-    briefly show a false availability/error state. The old implementation waited on a
-    React ``#root`` that the current site no longer exposes, then stacked another
-    first-rate wait and a long polling loop. That turned a roughly 13-15 second page
-    into a 40+ second scrape and could leave us reading the page after Selfbook had
-    already fallen into its temporary error state.
-
-    New empty-result behavior is intentionally simple:
-      1. keep the original browser/page;
-      2. for long searches, do the first room read at roughly T+13 seconds from
-         navigation start (short searches use a smaller render window);
-      3. if that first DOM read is empty, wait exactly two seconds;
-      4. read the SAME top-document DOM with the SAME parser again;
-      5. if still empty, return empty immediately.
-
-    No iframe scan, BeautifulSoup fallback, refresh, first-rate wait, long poll, or
-    second browser is triggered merely because the room elements were empty. Browser
-    fallback remains reserved for actual Selenium/Chrome exceptions in scrape_1hotels().
+    """Open one Selfbook page, verify accommodation cards, traverse room carousels,
+    and settle all observed rate-plan prices before returning. Empty or incomplete
+    scans are never considered cacheable successes. Browser retries remain bounded.
     """
     driver = None
     started_at = time.monotonic()
@@ -3048,9 +2959,11 @@ def scrape_1hotels_once(
                 f"states={navigation_states!r}"
             )
 
-        # Wait for actual room/rate content, not simply a nonempty React root or
-        # OneTrust cookie dialog. An explicit no-availability message must remain
-        # stable across observations before being considered a genuine empty search.
+        # Scan every room carousel instead of stopping after a single priced title.
+        # A previous version accepted the first "Parking" price and immediately
+        # returned success. The collector now requires actual room-card/rate-plan
+        # pairs, traverses the horizontal slide groups, merges virtualized cards,
+        # and observes an additional stable period after the first valid rate.
         warmup_result = {"contexts_scrolled": 0, "frame_errors": [],
                          "top_level_fast_path": False, "found_in_frame": False}
         initial_render_elapsed_seconds = round(time.monotonic() - navigation_started_at, 2)
@@ -3064,19 +2977,34 @@ def scrape_1hotels_once(
         retry_dom_state = initial_dom_state
         retry_page_text = initial_page_text
         transient_error_retry = transient_error_initial
-        same_page_retry_delay_seconds = 2.0
+        same_page_retry_delay_seconds = EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS
         same_page_retry_applied = False
         same_page_retry_succeeded = False
-        render_status_history = []
+        render_status_history: List[Dict[str, object]] = []
         poll_cycles_count = 0
         prices_seen = False
         empty_state_count = 0
         cookie_dismissed = False
         rooms: List[Dict] = []
         raw_rooms: List[Dict] = []
-        # Timer begins after the initial render window; do not charge page
-        # navigation delays twice. Upper bound avoids indefinite waits.
+        collected_by_name: Dict[str, Dict] = {}
+        discovered_room_names: set = set()
+        rejected_name_samples: List[Dict] = []
+        unpriced_title_samples: set = set()
+        max_room_cards_seen = 0
+        max_rate_rows_seen = 0
+        max_carousels_seen = 0
+        expected_slides_seen = 1
+        carousel_steps_completed = False
+        sweep_index = 0
+        stability_count = 0
+        prior_fingerprint = ""
+        first_valid_at: Optional[float] = None
+        first_read_at: Optional[float] = None
+        capture_complete = False
+        # A maximum render period is only a safety bound, not the success condition.
         max_render_wait = max(18.0, min(36.0, float(wait_seconds) + 18.0))
+        minimum_settle_seconds = max(2.0, float(settle_seconds))
         poll_started = time.monotonic()
         while time.monotonic() - poll_started < max_render_wait:
             poll_cycles_count += 1
@@ -3084,68 +3012,129 @@ def scrape_1hotels_once(
                 driver.switch_to.default_content()
             except Exception:
                 pass
+
             status = get_booking_render_status(driver)
-            render_status_history.append(status)
-            if len(render_status_history) > 12:
-                render_status_history.pop(0)
-            if not cookie_dismissed and status.get('cookieOnly'):
+            if len(render_status_history) < 12 or poll_cycles_count % 4 == 0:
+                render_status_history.append(status)
+                render_status_history = render_status_history[-16:]
+            if not cookie_dismissed and status.get("cookieOnly"):
                 cookie_dismissed = dismiss_booking_cookie_banner(driver)
+
             if poll_cycles_count == 1 or poll_cycles_count % 4 == 0:
                 scroll_booking_page_once(driver, poll_cycles_count)
-                warmup_result['contexts_scrolled'] += 1
+                warmup_result["contexts_scrolled"] += 1
+            carousel_state = scroll_room_carousels(driver, sweep_index)
+            max_carousels_seen = max(max_carousels_seen, carousel_state["carouselCount"])
+            expected_slides_seen = max(expected_slides_seen, carousel_state["maxSlides"])
+            # One viewport per step. The screenshot shows a horizontal CSS scroll-snap
+            # item-group with 7 slides. 24 caps pathological page structures.
+            sweep_steps = min(24, max(4, expected_slides_seen - 1))
+            if carousel_state["carouselCount"] == 0 or sweep_index >= sweep_steps:
+                carousel_steps_completed = True
+            time.sleep(0.35)  # allow scroll-snap and virtualized slide painting
+
             current_raw = parse_rooms_with_browser_dom(driver)
             current_rooms = dedupe_rooms(current_raw)
-            if poll_cycles_count == 1:
+            parser_state = get_room_parse_diagnostics(driver)
+            max_room_cards_seen = max(max_room_cards_seen, int(parser_state.get("candidateRoomCards") or 0))
+            max_rate_rows_seen = max(max_rate_rows_seen, int(parser_state.get("ratePlanRows") or 0))
+            for rejected in parser_state.get("rejected", []):
+                if isinstance(rejected, dict) and rejected not in rejected_name_samples:
+                    rejected_name_samples.append(rejected)
+            unpriced_title_samples.update(str(x) for x in parser_state.get("unpriced", []) if x)
+            now = time.monotonic()
+
+            if first_read_at is None:
+                first_read_at = now
                 same_page_initial_raw = current_raw
                 same_page_initial_rooms = current_rooms
-            elif not same_page_retry_applied:
+            elif (not same_page_initial_rooms and not same_page_retry_applied
+                  and now - first_read_at >= same_page_retry_delay_seconds):
                 same_page_retry_applied = True
                 same_page_retry_raw = current_raw
                 same_page_retry_rooms = current_rooms
                 same_page_retry_succeeded = bool(current_rooms)
+
             if current_rooms:
-                raw_rooms, rooms = current_raw, current_rooms
                 prices_seen = True
+                if first_valid_at is None:
+                    first_valid_at = now
+                for room in current_rooms:
+                    key = normalize_room_name(str(room["room_name"])).casefold()
+                    discovered_room_names.add(key)
+                    # Prefer the latest visible price for a repeated/virtualized card.
+                    collected_by_name[key] = dict(room)
+                raw_rooms = list(collected_by_name.values())
+                rooms = dedupe_rooms(raw_rooms)
+
+            fingerprint = room_fingerprint(rooms)
+            if fingerprint and fingerprint == prior_fingerprint:
+                stability_count += 1
+            else:
+                stability_count = 0
+                prior_fingerprint = fingerprint
+
+            if (rooms and carousel_steps_completed and first_valid_at is not None
+                and now - first_valid_at >= minimum_settle_seconds
+                and stability_count >= 2):
+                capture_complete = True
                 break
-            prices_seen = prices_seen or bool(get_booking_app_state(driver).get('priceTextFound'))
-            if status.get('explicitlyUnavailable') and not status.get('cookieOnly') and not status.get('loading'):
+
+            if not rooms and status.get("explicitlyUnavailable") and not status.get("loading") and not status.get("cookieOnly"):
                 empty_state_count += 1
-                if empty_state_count >= 3:
-                    break
             else:
                 empty_state_count = 0
-            time.sleep(0.75)
+            if (not rooms and empty_state_count >= 4
+                and now - poll_started >= 4.0):
+                break
+
+            sweep_index = sweep_index + 1 if sweep_index < sweep_steps else 0
+            time.sleep(0.35)
+
+        reset_room_carousels(driver)
         retry_page_text = read_visible_page_text()
         transient_error_retry = has_transient_availability_error(retry_page_text)
         retry_dom_state = get_booking_app_state(driver)
         render_wait_elapsed = round(time.monotonic() - poll_started, 2)
-        confirmed_no_availability = empty_state_count >= 3
-        failure_reason = ('' if rooms else 'NO_AVAILABILITY' if confirmed_no_availability
-                          else 'RATE_PARSE_FAILED' if prices_seen else 'RATE_LOAD_TIMEOUT')
-
-        fast_path_used = bool(rooms)
+        confirmed_no_availability = not rooms and empty_state_count >= 4
+        failure_reason = (
+            "" if capture_complete else
+            "INCOMPLETE_CAPTURE" if rooms else
+            "NO_AVAILABILITY" if confirmed_no_availability else
+            "RATE_PARSE_FAILED" if max_room_cards_seen or prices_seen else
+            "RATE_LOAD_TIMEOUT"
+        )
+        fast_path_used = capture_complete
         first_rate_result = {
-            "found": bool(rooms),
-            "rooms": rooms,
-            "cycles": 1 if rooms else 0,
-            "seen_price_text": bool(rooms),
-            "contexts_checked": 1,
-            "iframe_count": 0,
-            "frame_errors": [],
-            "elapsed_seconds": 0.0,
+            "found": bool(rooms), "rooms": rooms, "cycles": poll_cycles_count,
+            "seen_price_text": prices_seen, "contexts_checked": 1, "iframe_count": 0,
+            "frame_errors": [], "elapsed_seconds": render_wait_elapsed,
         }
-        price_settle_seconds = 0.0
-        effective_price_poll_seconds = 0.0
-        minimum_price_poll_seconds = 0.0
+        price_settle_seconds = minimum_settle_seconds if first_valid_at is not None else 0.0
+        effective_price_poll_seconds = render_wait_elapsed
+        minimum_price_poll_seconds = minimum_settle_seconds
         poll_result = {
-            "raw_rooms": raw_rooms,
-            "rooms": rooms,
-            "cycles": 1 if rooms else 0,
-            "seen_price_text": bool(rooms),
-            "contexts_checked": 1,
-            "iframe_count": 0,
-            "frame_errors": [],
-            "elapsed_seconds": 0.0,
+            "raw_rooms": raw_rooms, "rooms": rooms, "cycles": poll_cycles_count,
+            "seen_price_text": prices_seen, "contexts_checked": 1,
+            "iframe_count": 0, "frame_errors": [], "elapsed_seconds": render_wait_elapsed,
+        }
+        room_collection_diagnostics = {
+            "capture_complete": capture_complete,
+            "horizontal_scan_completed": carousel_steps_completed,
+            "room_carousels": max_carousels_seen,
+            "max_reported_carousel_slides": expected_slides_seen,
+            "max_room_card_count": max_room_cards_seen,
+            "max_rate_plan_rows": max_rate_rows_seen,
+            "distinct_priced_room_count": len(rooms),
+            "priced_rooms": [room["room_name"] for room in rooms],
+            "rejected_elements": rejected_name_samples[:25],
+            "unpriced_room_titles": sorted(unpriced_title_samples)[:30],
+            "stability_confirmations": stability_count,
+            "poll_cycles": poll_cycles_count,
+            "first_valid_rate_seen": first_valid_at is not None,
+            "settle_seconds_requested": minimum_settle_seconds,
+            "elapsed_seconds": render_wait_elapsed,
+            "last_parser_scan": get_room_parse_diagnostics(driver),
         }
 
         try:
@@ -3155,7 +3144,9 @@ def scrape_1hotels_once(
         page_text = BeautifulSoup(html_source, "html.parser").get_text("\n", strip=True) if html_source else retry_page_text
 
         return {
-            "ok": True,
+            "ok": bool(capture_complete),
+            "capture_complete": bool(capture_complete),
+            "room_collection_diagnostics": room_collection_diagnostics,
             "rooms": rooms,
             "raw_count": len(raw_rooms),
             "page_text_preview": page_text[:3500],
@@ -3173,12 +3164,12 @@ def scrape_1hotels_once(
             "initial_render_target_seconds": initial_render_target_seconds,
             "initial_render_elapsed_seconds": initial_render_elapsed_seconds,
             "price_settle_seconds": price_settle_seconds,
-            "post_data_settle_applied": False,
+            "post_data_settle_applied": bool(capture_complete),
             "first_rate_found": bool(rooms),
             "first_rate_wait_seconds": 0.0,
             "first_rate_wait_cycles": 0,
-            "price_poll_seconds": render_wait_elapsed,
-            "minimum_price_poll_seconds": 0.0,
+            "price_poll_seconds": effective_price_poll_seconds,
+            "minimum_price_poll_seconds": minimum_price_poll_seconds,
             # Retain the old debug keys so the UI/history stays backward-compatible,
             # but they now describe a snapshot instead of a blocking #root readiness wait.
             "app_ready_elapsed_seconds": initial_render_elapsed_seconds,
@@ -3251,6 +3242,8 @@ def scrape_1hotels(
                     "mode": mode_name,
                     "status": "ok",
                     "rooms_count": len(rooms),
+                    "capture_complete": bool(result.get("capture_complete", False)),
+                    "room_collection_diagnostics": result.get("room_collection_diagnostics", {}),
                     "get_timed_out": result.get("get_timed_out", False),
                     "navigation_retries": result.get("navigation_retries", 0),
                     "navigation_states": result.get("navigation_states", []),
@@ -3291,19 +3284,9 @@ def scrape_1hotels(
             result["retry_history"] = history
             last_result = result
 
-            if rooms:
-                return result
-
-            # A correctly loaded booking page with genuinely empty inventory does not
-            # warrant a new browser. Failed navigation and blank DOM raise above and
-            # therefore reach the fallback attempt through the exception handler.
-            # IMPORTANT: an empty result is not a reason to launch a second browser.
-            # scrape_1hotels_once() already kept the original page alive, waited two
-            # seconds, and retried the same primary DOM parser before its compatibility
-            # polling path. Only actual browser/runtime exceptions may reach the fallback
-            # browser attempt below.
-            if result.get("failure_reason") in ("RATE_LOAD_TIMEOUT", "RATE_PARSE_FAILED") and attempt_index < len(attempts):
-                continue
+            # Do not start a second browser for an empty or partial result. The
+            # original page already received the full bounded carousel scan.
+            # A fresh fallback Chrome is reserved for actual browser exceptions.
             return result
         except Exception as exc:
             last_exception = exc
@@ -3358,8 +3341,12 @@ def read_rate_cache(url: str, ttl_seconds: int) -> Optional[Dict]:
             return None
         result = copy.deepcopy(entry.get("result"))
 
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or result.get("capture_complete") is not True:
         return None
+    validated = dedupe_rooms(result.get("rooms", []))
+    if not validated:
+        return None
+    result["rooms"] = validated
     result["cache_status"] = "hit"
     result["cache_age_seconds"] = round(age_seconds, 1)
     result["cache_ttl_seconds"] = ttl_seconds
@@ -3368,7 +3355,10 @@ def read_rate_cache(url: str, ttl_seconds: int) -> Optional[Dict]:
 
 def write_rate_cache(url: str, result: Dict) -> None:
     """Cache only successful results containing at least one room; never cache failures."""
-    if not isinstance(result, dict) or not result.get("rooms"):
+    if not isinstance(result, dict) or result.get("capture_complete") is not True:
+        return
+    valid_rooms = dedupe_rooms(result.get("rooms", []))
+    if not valid_rooms:
         return
 
     store = get_rate_cache_store()
@@ -3378,6 +3368,7 @@ def write_rate_cache(url: str, result: Dict) -> None:
     now = time.time()
 
     clean_result = copy.deepcopy(result)
+    clean_result["rooms"] = valid_rooms
     clean_result.pop("cache_status", None)
     clean_result.pop("cache_age_seconds", None)
     clean_result.pop("cache_ttl_seconds", None)
@@ -3436,7 +3427,7 @@ def scrape_1hotels_with_cache(
     result["cache_status"] = "live"
     result["cache_age_seconds"] = 0.0
     result["cache_ttl_seconds"] = cache_ttl_seconds
-    if result.get("rooms"):
+    if result.get("rooms") and result.get("capture_complete"):
         write_rate_cache(url, result)
     return result
 
@@ -3864,6 +3855,8 @@ if "last_rooms" not in st.session_state:
     st.session_state.last_rooms = []
 if "last_error" not in st.session_state:
     st.session_state.last_error = ""
+if "last_result_complete" not in st.session_state:
+    st.session_state.last_result_complete = False
 if "generated_email" not in st.session_state:
     st.session_state.generated_email = ""
 
@@ -3885,8 +3878,8 @@ if search_clicked:
     cache_ttl_seconds = int(rate_cache_minutes) * 60
     spinner_prefix = "Forcing live refresh" if force_live_refresh else f"Checking {int(rate_cache_minutes)}-minute cache, then live site if needed"
     with st.spinner(
-        f"{spinner_prefix}. Live search keeps the same booking page open if the first room read is empty, "
-        f"retries that same DOM after {EMPTY_RESULT_SAME_PAGE_RETRY_SECONDS:g}s, then stops if it is still empty. Empty room reads do not launch fallback polling or a second browser."
+        f"{spinner_prefix}. Verifying room-card/rate-plan matches, scanning horizontal room carousels, "
+        "and checking that prices are stable before caching."
     ):
         try:
             result = scrape_1hotels_with_cache(
@@ -3899,8 +3892,11 @@ if search_clicked:
                 force_live_refresh=bool(force_live_refresh),
             )
             rooms = apply_currency_display(result.get("rooms", []), currency)
+            excluded_currency_rooms = len(result.get("rooms", [])) - len(rooms)
             retry_history = result.get("retry_history", [])
             st.session_state.last_error = ""
+            if excluded_currency_rooms:
+                st.warning(f"Excluded {excluded_currency_rooms} room(s) with an explicit currency symbol that does not match {currency}. Verify the booking-site currency setting.")
 
             used_fallback = any(item.get("mode") == "fallback" and item.get("status") == "ok" for item in retry_history)
             primary_failed = bool(retry_history and retry_history[0].get("status") == "failed")
@@ -3910,7 +3906,12 @@ if search_clicked:
                 st.session_state.last_output_text = ""
                 st.session_state.last_df = pd.DataFrame()
                 st.session_state.last_rooms = []
-                st.error("No room rates were parsed. The page structure may have changed, the rate component may not have loaded, or anti-bot verification may have been triggered.")
+                st.session_state.last_result_complete = False
+                st.session_state.generated_email = ""
+                if result.get("failure_reason") == "NO_AVAILABILITY":
+                    st.warning("No sellable room inventory was confirmed for these dates. Please verify availability on the booking website.")
+                else:
+                    st.error("No verified room rates were parsed. Check the room-discovery diagnostics: the booking page may still be loading, may have changed its markup, or may have blocked automation.")
                 with st.expander("Debug: page text preview"):
                     st.text(result.get("page_text_preview", "")[:3500])
                 with st.expander("Debug: HTML preview"):
@@ -3918,6 +3919,8 @@ if search_clicked:
                 with st.expander("Debug: retry history"):
                     st.json(retry_history)
             else:
+                if not result.get("capture_complete"):
+                    st.warning("Some valid room rates were found, but the carousel scan did not pass the completeness/stability check. Treat these as partial results; this search was NOT cached.")
                 if same_page_retry_succeeded:
                     st.info(
                         f"The first room-element read was empty, so the same booking page was kept open for "
@@ -3930,6 +3933,7 @@ if search_clicked:
                 st.session_state.last_output_text = "\n".join(output_lines)
                 st.session_state.last_df = build_output_dataframe(rooms, discount_percent)
                 st.session_state.last_rooms = rooms
+                st.session_state.last_result_complete = bool(result.get("capture_complete"))
                 st.session_state.generated_email = ""
                 for index, room in enumerate(rooms):
                     room_key = get_room_selection_key(index, room)
@@ -3942,10 +3946,15 @@ if search_clicked:
                         "No browser was launched for this search."
                     )
                 else:
-                    st.success(
-                        f"Live search completed: parsed {len(rooms)} room type(s). "
-                        f"Successful result cached for {int(rate_cache_minutes)} minute(s)."
-                    )
+                    if result.get("capture_complete"):
+                        st.success(
+                            f"Verified live search: {len(rooms)} real accommodation type(s). "
+                            f"Rates cached for {int(rate_cache_minutes)} minute(s)."
+                        )
+                    else:
+                        st.info(f"Found {len(rooms)} room type(s). Scan is incomplete; no cache entry was created.")
+                with st.expander("Debug: room discovery & rate-plan validation", expanded=False):
+                    st.json(result.get("room_collection_diagnostics", {}))
                 with st.expander("Debug: retry history", expanded=False):
                     st.json(retry_history)
         except Exception as exc:
@@ -4026,9 +4035,21 @@ if save_template_clicked:
     )
 
 st.subheader("Generated Email")
+# Stored browser templates may contain historical fixed quote-validity dates.
+for matched in re.finditer(r"\bvalid\s+until\s+(\d{4}-\d{2}-\d{2})\b", str(st.session_state.email_ending), re.I):
+    try:
+        if date.fromisoformat(matched.group(1)) < date.today():
+            st.warning("Your saved Email Ending contains an expired quote-validity date. Please update the template before sending a quote.")
+            break
+    except ValueError:
+        pass
 email_button_col, email_button_spacer = st.columns([1, 5])
 with email_button_col:
-    email_clicked = st.button("EMAIL", type="primary", use_container_width=True)
+    email_clicked = st.button(
+        "EMAIL", type="primary", use_container_width=True,
+        disabled=not bool(st.session_state.get("last_result_complete")),
+        help="Email quoting is enabled only after the room-carousel scan and rate validation are complete.",
+    )
 
 if email_clicked or st.session_state.generated_email:
     selected_lines_by_category = get_selected_room_lines_by_category(st.session_state.last_rooms, discount_percent)
